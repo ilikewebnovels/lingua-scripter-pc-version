@@ -203,6 +203,37 @@ export const translateBatch = async (
     }
 };
 
+// Translate chapter titles in a single request
+export const translateChapterTitles = async (
+    chapters: { id: string; title: string }[],
+    settings: Settings,
+    signal?: AbortSignal
+): Promise<{
+    titles: { id: string; translatedTitle: string }[];
+} | { error: string }> => {
+    if (chapters.length === 0) {
+        return { titles: [] };
+    }
+
+    try {
+        const response = await fetch(`${API_URL}/translate-chapter-titles`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chapters, ...settings }),
+            signal,
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Title translation failed.');
+        }
+        return data;
+    } catch (error) {
+        console.error('Error during chapter title translation:', error);
+        if (error instanceof Error) return { error: `Chapter title translation failed: ${error.message}` };
+        return { error: 'An unknown error occurred during chapter title translation.' };
+    }
+};
+
 // Streaming batch translation - translates multiple chapters with streaming to prevent timeouts
 export interface BatchStreamProgress {
     type: 'chunk' | 'chapter_complete' | 'done' | 'error';

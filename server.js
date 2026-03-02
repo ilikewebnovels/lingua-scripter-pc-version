@@ -29,6 +29,7 @@ import settingsRouter from './server/settings.js';
 import translationMemoryRouter from './server/translationMemory.js';
 import aiRouter from './server/ai.js';
 import backupRouter from './server/backup.js';
+import exportRouter from './server/export.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,6 +66,7 @@ app.use('/api', aiRouter);
 
 // Backup & Restore routes
 app.use('/api', backupRouter);
+app.use('/api', exportRouter);
 
 
 

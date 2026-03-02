@@ -35,6 +35,7 @@ interface ProjectSidebarProps {
   onOpenExportModal: () => void;
   onOpenImportModal: () => void;
   onOpenBatchTranslate: () => void;
+  onOpenBatchTitleTranslate: () => void;
 
   onOpenStatistics: () => void;
   onOpenBackupRestore: () => void;
@@ -77,6 +78,7 @@ const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
   onOpenExportModal,
   onOpenImportModal,
   onOpenBatchTranslate,
+  onOpenBatchTitleTranslate,
 
   onOpenStatistics,
   onOpenBackupRestore,
@@ -236,22 +238,49 @@ const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
 
         {/* Chapters Section */}
         <div className="p-4 border-t border-[var(--border-primary)]">
-          <div className="flex justify-between items-center mb-2">
-            <h2 className="text-lg font-bold text-[var(--accent-primary)]">Chapters</h2>
+          <div className="mb-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-lg font-bold text-[var(--accent-primary)]">Chapters</h2>
+              {activeProjectId && (
+                <button
+                  onClick={onNewChapter}
+                  className="text-sm flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-[var(--accent-primary)] text-[var(--text-on-accent)] hover:bg-[var(--accent-secondary)] transition-colors whitespace-nowrap"
+                  title="Create New Chapter"
+                >
+                  <PlusIcon /> New Chapter
+                </button>
+              )}
+            </div>
             {activeProjectId && (
-              <div className="flex items-center gap-2">
-                <button onClick={onOpenBatchTranslate} className="text-sm flex items-center gap-1 text-[var(--accent-primary)] hover:underline" title="Batch Translate Chapters">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" /><path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" /></svg>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  onClick={onOpenBatchTranslate}
+                  className="text-xs font-medium flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--accent-primary)] border border-[var(--border-primary)] hover:bg-[var(--bg-primary)] transition-colors"
+                  title="Batch Translate Chapters"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" /><path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" /></svg>
                   Batch
                 </button>
-                <button onClick={onOpenImportModal} className="text-sm flex items-center gap-1 text-[var(--accent-primary)] hover:underline" title="Import Chapters from File">
+                <button
+                  onClick={onOpenBatchTitleTranslate}
+                  className="text-xs font-medium flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--accent-primary)] border border-[var(--border-primary)] hover:bg-[var(--bg-primary)] transition-colors"
+                  title="Translate Chapter Titles in Batch"
+                >
+                  <PencilIcon /> Titles
+                </button>
+                <button
+                  onClick={onOpenImportModal}
+                  className="text-xs font-medium flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--accent-primary)] border border-[var(--border-primary)] hover:bg-[var(--bg-primary)] transition-colors"
+                  title="Import Chapters from File"
+                >
                   <ImportIcon /> Import
                 </button>
-                <button onClick={onOpenExportModal} className="text-sm flex items-center gap-1 text-[var(--accent-primary)] hover:underline" title="Export Project as PDF">
+                <button
+                  onClick={onOpenExportModal}
+                  className="text-xs font-medium flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--accent-primary)] border border-[var(--border-primary)] hover:bg-[var(--bg-primary)] transition-colors"
+                  title="Export Project"
+                >
                   <ExportIcon /> Export
-                </button>
-                <button onClick={onNewChapter} className="text-sm flex items-center gap-1 text-[var(--accent-primary)] hover:underline" title="Create New Chapter">
-                  <PlusIcon /> New
                 </button>
               </div>
             )}

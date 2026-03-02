@@ -27,7 +27,10 @@ const defaultSettings = {
     isStreamingEnabled: true,
     isTranslationMemoryEnabled: true,
     isAutoCharacterDetectionEnabled: true,
-    reasoningEffort: 'auto'
+    reasoningEffort: 'auto',
+    requestRetryCount: 0,
+    batchSkipTranslated: true,
+    batchSize: 10
 };
 
 // Get settings

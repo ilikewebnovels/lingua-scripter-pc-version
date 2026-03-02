@@ -35,8 +35,7 @@ const GlossaryIcon = () => <span className="text-blue-400 text-xs font-medium">G
 const CharacterIcon = () => <span className="text-purple-400 text-xs font-medium">C</span>;
 const StopIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="6" y="6" width="8" height="8" rx="1" /></svg>;
 
-// Chapter translation status
-type ChapterStatus = 'pending' | 'translating' | 'completed' | 'error';
+type TranslationChapterInput = Pick<Chapter, 'id' | 'title' | 'originalText'>;
 
 const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
     isOpen,
@@ -63,9 +62,10 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
 
     // Use parent's chapter status instead of local (for display when modal re-opens)
     const chapterStatus = batchChapterStatus;
-    // Local streaming text for display in modal (mirrors what parent tracks)
-    const [streamingText, setStreamingText] = useState<string>('');
-    const [currentStreamingChapter, setCurrentStreamingChapter] = useState<number>(0);
+    // Keep local setters so we can clear transient streaming state between runs.
+    const [, setStreamingText] = useState<string>('');
+    const [, setCurrentStreamingChapter] = useState<number>(0);
+    const [isAutoBatching, setIsAutoBatching] = useState(false);
 
     // Range selection state
     const [rangeStart, setRangeStart] = useState<string>('');
@@ -74,6 +74,15 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
     // Abort controller for cancelling batch translation
     const batchAbortController = useRef<AbortController | null>(null);
     const isBatchCancelled = useRef(false);
+
+    useEffect(() => {
+        return () => {
+            if (batchAbortController.current) {
+                batchAbortController.current.abort();
+            }
+        };
+    }, []);
+
     // Sort chapters
     const sortedChapters = useMemo(() =>
         [...chapters].sort((a, b) => (a.chapterNumber || 0) - (b.chapterNumber || 0)),
@@ -239,46 +248,36 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
             batchAbortController.current.abort();
             batchAbortController.current = null;
         }
-        onBatchComplete();
-    }, [onBatchComplete]);
+        setIsAutoBatching(false);
+    }, []);
 
-    // Translate Next Batch - selects next N untranslated chapters and starts translation
-    const handleTranslateNextBatch = async () => {
-        // Get next batch of untranslated chapters
-        const nextBatch = untranslatedChapters.slice(0, settings.batchSize);
-
-        if (nextBatch.length === 0) {
-            setError('No untranslated chapters remaining.');
-            return;
-        }
-
-        // Select them
-        setSelectedChapterIds(new Set(nextBatch.map(ch => ch.id)));
-
-        // Notify parent that batch translation is starting
-        const chapterIds = nextBatch.map(ch => ch.id);
+    const startBatchSession = useCallback((chapterIds: string[]) => {
         onBatchStart(chapterIds);
-        // Reset cancellation state and create new AbortController
         isBatchCancelled.current = false;
         batchAbortController.current = new AbortController();
         setError(null);
         setResult(null);
         setStreamingText('');
         setCurrentStreamingChapter(0);
+    }, [onBatchStart]);
 
-        const chaptersToTranslate = nextBatch.map(ch => ({
-            id: ch.id,
-            title: ch.title,
-            originalText: ch.originalText
-        }));
+    const finishBatchSession = useCallback(() => {
+        batchAbortController.current = null;
+        setIsAutoBatching(false);
+        onBatchComplete();
+    }, [onBatchComplete]);
 
-        // Filter glossary and characters to only include entries that appear in the batch chapters
+    const translateChapterBatch = useCallback(async (
+        chaptersToTranslate: TranslationChapterInput[],
+        completedOffset = 0
+    ): Promise<{ translatedCount: number; charactersFound: number; cancelled: boolean; hasError: boolean; }> => {
+        let translatedCount = 0;
+        let charactersFound = 0;
+
         const { filteredGlossary, filteredCharacters } = filterEntriesForChapters(chaptersToTranslate);
 
         try {
             if (settings.isStreamingEnabled) {
-                // Streaming mode - update chapters as they complete
-                let translatedCount = 0;
                 let currentChapterStreamingText = '';
                 const stream = translateBatchStream(
                     chaptersToTranslate,
@@ -289,48 +288,42 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
                 );
 
                 for await (const progress of stream) {
-                    // Check if cancelled
-                    if (isBatchCancelled.current) break;
+                    if (isBatchCancelled.current) {
+                        return { translatedCount, charactersFound, cancelled: true, hasError: false };
+                    }
+
                     if (progress.type === 'chunk' && progress.chapterIndex && progress.text) {
-                        // Update streaming text for live display
                         currentChapterStreamingText += progress.text;
                         setStreamingText(prev => prev + progress.text);
                         setCurrentStreamingChapter(progress.chapterIndex);
 
-                        // Notify parent of streaming progress
                         const chapterId = chaptersToTranslate[progress.chapterIndex - 1]?.id;
                         if (chapterId) {
                             onBatchProgress({
                                 chapterId,
                                 status: 'translating',
                                 streamingText: currentChapterStreamingText,
-                                completedCount: translatedCount
+                                completedCount: completedOffset + translatedCount
                             });
                         }
                     } else if (progress.type === 'chapter_complete' && progress.chapterId && progress.fullText) {
-                        // Save completed chapter
                         await onUpdateChapter(progress.chapterId, {
                             translatedText: progress.fullText
                         });
                         translatedCount++;
-                        // Reset streaming text for next chapter
                         currentChapterStreamingText = '';
-                        // Notify parent of completion
                         onBatchProgress({
                             chapterId: progress.chapterId,
                             status: 'completed',
-                            completedCount: translatedCount
+                            completedCount: completedOffset + translatedCount
                         });
                     } else if (progress.type === 'error') {
                         setError(progress.error || 'Streaming error');
-                        break;
+                        return { translatedCount, charactersFound, cancelled: false, hasError: true };
                     }
                 }
 
-                // After streaming batch completes, analyze for new characters (like single chapter streaming does)
-                let charactersFound = 0;
                 if (translatedCount > 0 && settings.isAutoCharacterDetectionEnabled) {
-                    // Combine all original texts for character analysis
                     const combinedText = chaptersToTranslate.map(ch => ch.originalText).join('\n\n');
                     console.log('[BatchTranslate] Starting character analysis for streaming batch...');
                     console.log('[BatchTranslate] Combined text length:', combinedText.length);
@@ -353,12 +346,15 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
                 } else {
                     console.log('[BatchTranslate] Skipping character analysis - translatedCount:', translatedCount, 'isAutoEnabled:', settings.isAutoCharacterDetectionEnabled);
                 }
-
-                setResult({ translatedCount, charactersFound });
-                setSelectedChapterIds(new Set());
-
             } else {
-                // Non-streaming mode - existing logic
+                chaptersToTranslate.forEach(chapter => {
+                    onBatchProgress({
+                        chapterId: chapter.id,
+                        status: 'translating',
+                        completedCount: completedOffset + translatedCount
+                    });
+                });
+
                 const response = await translateBatch(
                     chaptersToTranslate,
                     filteredGlossary,
@@ -369,13 +365,13 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
 
                 if ('error' in response) {
                     setError(response.error);
-                    onBatchComplete();
-                    return;
+                    return { translatedCount, charactersFound, cancelled: false, hasError: true };
                 }
 
-                // Update each chapter with its translation
-                let translatedCount = 0;
                 for (const translation of response.translations) {
+                    if (isBatchCancelled.current) {
+                        return { translatedCount, charactersFound, cancelled: true, hasError: false };
+                    }
                     if (translation.translatedText) {
                         await onUpdateChapter(translation.chapterId, {
                             translatedText: translation.translatedText
@@ -384,29 +380,155 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
                         onBatchProgress({
                             chapterId: translation.chapterId,
                             status: 'completed',
-                            completedCount: translatedCount
+                            completedCount: completedOffset + translatedCount
                         });
                     }
                 }
 
-                // Add new characters to the database
                 if (response.characters && response.characters.length > 0 && settings.isAutoCharacterDetectionEnabled) {
                     onAddCharacters(response.characters);
+                    charactersFound = response.characters.length;
                 }
-
-                setResult({
-                    translatedCount,
-                    charactersFound: response.characters?.length || 0
-                });
-
-                // Clear selection after successful batch
-                setSelectedChapterIds(new Set());
             }
         } catch (err) {
+            const errorName = typeof err === 'object' && err !== null && 'name' in err
+                ? String((err as { name: string }).name)
+                : '';
+            if (isBatchCancelled.current || errorName === 'AbortError') {
+                return { translatedCount, charactersFound, cancelled: true, hasError: false };
+            }
             setError(err instanceof Error ? err.message : 'An unexpected error occurred');
+            return { translatedCount, charactersFound, cancelled: false, hasError: true };
         }
 
-        onBatchComplete();
+        return { translatedCount, charactersFound, cancelled: false, hasError: false };
+    }, [
+        filterEntriesForChapters,
+        settings,
+        onBatchProgress,
+        onUpdateChapter,
+        onAddCharacters
+    ]);
+
+    // Translate Next Batch - selects next N untranslated chapters and starts translation
+    const handleTranslateNextBatch = async () => {
+        const nextBatch = untranslatedChapters.slice(0, settings.batchSize);
+        if (nextBatch.length === 0) {
+            setError('No untranslated chapters remaining.');
+            return;
+        }
+
+        const chapterIds = nextBatch.map(ch => ch.id);
+        setSelectedChapterIds(new Set(chapterIds));
+        startBatchSession(chapterIds);
+
+        try {
+            const summary = await translateChapterBatch(nextBatch.map(ch => ({
+                id: ch.id,
+                title: ch.title,
+                originalText: ch.originalText
+            })));
+
+            if (summary.translatedCount > 0) {
+                setResult({
+                    translatedCount: summary.translatedCount,
+                    charactersFound: summary.charactersFound
+                });
+            }
+
+            if (!summary.hasError && !summary.cancelled) {
+                setSelectedChapterIds(new Set());
+            }
+        } finally {
+            finishBatchSession();
+        }
+    };
+
+    const handleAutoBatchTranslate = async () => {
+        const hasRangeInput = rangeStart.trim() !== '' || rangeEnd.trim() !== '';
+
+        let scopeChapters = sortedChapters;
+        if (hasRangeInput) {
+            const start = parseInt(rangeStart, 10);
+            const end = parseInt(rangeEnd, 10);
+
+            if (isNaN(start) || isNaN(end) || start > end) {
+                setError('Please enter a valid chapter range for auto-batch.');
+                return;
+            }
+
+            scopeChapters = sortedChapters.filter(ch =>
+                ch.chapterNumber >= start && ch.chapterNumber <= end
+            );
+
+            if (scopeChapters.length === 0) {
+                setError('No chapters found in the selected range.');
+                return;
+            }
+        }
+
+        const autoChapters = scopeChapters.filter(ch => !ch.translatedText?.trim());
+        if (autoChapters.length === 0) {
+            setError(hasRangeInput ? 'No untranslated chapters remaining in the selected range.' : 'No untranslated chapters remaining.');
+            return;
+        }
+
+        const chapterIds = autoChapters.map(ch => ch.id);
+        startBatchSession(chapterIds);
+        setIsAutoBatching(true);
+
+        let totalTranslatedCount = 0;
+        let totalCharactersFound = 0;
+        let wasCancelled = false;
+        let hadError = false;
+
+        try {
+            for (let i = 0; i < autoChapters.length; i += settings.batchSize) {
+                if (isBatchCancelled.current) {
+                    wasCancelled = true;
+                    break;
+                }
+
+                const currentBatch = autoChapters.slice(i, i + settings.batchSize);
+                const currentBatchIds = currentBatch.map(ch => ch.id);
+                setSelectedChapterIds(new Set(currentBatchIds));
+
+                const summary = await translateChapterBatch(
+                    currentBatch.map(ch => ({
+                        id: ch.id,
+                        title: ch.title,
+                        originalText: ch.originalText
+                    })),
+                    totalTranslatedCount
+                );
+
+                totalTranslatedCount += summary.translatedCount;
+                totalCharactersFound += summary.charactersFound;
+
+                if (summary.hasError) {
+                    hadError = true;
+                    break;
+                }
+
+                if (summary.cancelled) {
+                    wasCancelled = true;
+                    break;
+                }
+            }
+
+            setSelectedChapterIds(new Set());
+
+            if (totalTranslatedCount > 0) {
+                setResult({
+                    translatedCount: totalTranslatedCount,
+                    charactersFound: totalCharactersFound
+                });
+            } else if (!wasCancelled && !hadError) {
+                setError('No chapters were translated.');
+            }
+        } finally {
+            finishBatchSession();
+        }
     };
 
     const handleToggleChapter = (chapterId: string) => {
@@ -424,18 +546,9 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
     const handleBatchTranslate = async () => {
         if (selectedChapterIds.size === 0) return;
 
-        // Notify parent that batch translation is starting
         const chapterIds = Array.from(selectedChapterIds);
-        onBatchStart(chapterIds);
-        // Reset cancellation state and create new AbortController
-        isBatchCancelled.current = false;
-        batchAbortController.current = new AbortController();
-        setError(null);
-        setResult(null);
-        setStreamingText('');
-        setCurrentStreamingChapter(0);
+        startBatchSession(chapterIds);
 
-        // Prepare chapters for translation
         const chaptersToTranslate = sortedChapters
             .filter(ch => selectedChapterIds.has(ch.id))
             .map(ch => ({
@@ -444,133 +557,17 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
                 originalText: ch.originalText
             }));
 
-        // Filter glossary and characters to only include entries that appear in the batch chapters
-        const { filteredGlossary, filteredCharacters } = filterEntriesForChapters(chaptersToTranslate);
-
         try {
-            if (settings.isStreamingEnabled) {
-                // Streaming mode
-                let translatedCount = 0;
-                let currentChapterStreamingText = '';
-                const stream = translateBatchStream(
-                    chaptersToTranslate,
-                    filteredGlossary,
-                    filteredCharacters,
-                    settings,
-                    batchAbortController.current?.signal
-                );
-
-                for await (const progress of stream) {
-                    // Check if cancelled
-                    if (isBatchCancelled.current) break;
-                    if (progress.type === 'chunk' && progress.chapterIndex && progress.text) {
-                        currentChapterStreamingText += progress.text;
-                        setStreamingText(prev => prev + progress.text);
-                        setCurrentStreamingChapter(progress.chapterIndex);
-
-                        // Notify parent of streaming progress
-                        const chapterId = chaptersToTranslate[progress.chapterIndex - 1]?.id;
-                        if (chapterId) {
-                            onBatchProgress({
-                                chapterId,
-                                status: 'translating',
-                                streamingText: currentChapterStreamingText,
-                                completedCount: translatedCount
-                            });
-                        }
-                    } else if (progress.type === 'chapter_complete' && progress.chapterId && progress.fullText) {
-                        await onUpdateChapter(progress.chapterId, {
-                            translatedText: progress.fullText
-                        });
-                        translatedCount++;
-                        // Reset streaming text for next chapter
-                        currentChapterStreamingText = '';
-                        // Notify parent of completion
-                        onBatchProgress({
-                            chapterId: progress.chapterId,
-                            status: 'completed',
-                            completedCount: translatedCount
-                        });
-                    } else if (progress.type === 'error') {
-                        setError(progress.error || 'Streaming error');
-                        break;
-                    }
-                }
-
-                // After streaming batch completes, analyze for new characters (like single chapter streaming does)
-                let charactersFound = 0;
-                if (translatedCount > 0 && settings.isAutoCharacterDetectionEnabled) {
-                    // Combine all original texts for character analysis
-                    const combinedText = chaptersToTranslate.map(ch => ch.originalText).join('\n\n');
-                    console.log('[BatchTranslate] Starting character analysis for streaming batch...');
-                    console.log('[BatchTranslate] Combined text length:', combinedText.length);
-                    try {
-                        const charResult = await analyzeForCharacters(combinedText, settings);
-                        console.log('[BatchTranslate] Character analysis result:', charResult);
-                        if ('characters' in charResult && charResult.characters.length > 0) {
-                            console.log('[BatchTranslate] Found', charResult.characters.length, 'characters, adding to database...');
-                            onAddCharacters(charResult.characters);
-                            charactersFound = charResult.characters.length;
-                        } else if ('error' in charResult) {
-                            console.error('[BatchTranslate] Character analysis error:', charResult.error);
-                            setError(charResult.error);
-                        } else {
-                            console.log('[BatchTranslate] No characters found in analysis');
-                        }
-                    } catch (charError) {
-                        console.error('[BatchTranslate] Character analysis exception:', charError);
-                    }
-                } else {
-                    console.log('[BatchTranslate] Skipping character analysis - translatedCount:', translatedCount, 'isAutoEnabled:', settings.isAutoCharacterDetectionEnabled);
-                }
-
-                setResult({ translatedCount, charactersFound });
-
-            } else {
-                // Non-streaming mode
-                const response = await translateBatch(
-                    chaptersToTranslate,
-                    filteredGlossary,
-                    filteredCharacters,
-                    settings,
-                    batchAbortController.current?.signal
-                );
-
-                if ('error' in response) {
-                    setError(response.error);
-                    onBatchComplete();
-                    return;
-                }
-
-                let translatedCount = 0;
-                for (const translation of response.translations) {
-                    if (translation.translatedText) {
-                        await onUpdateChapter(translation.chapterId, {
-                            translatedText: translation.translatedText
-                        });
-                        translatedCount++;
-                        onBatchProgress({
-                            chapterId: translation.chapterId,
-                            status: 'completed',
-                            completedCount: translatedCount
-                        });
-                    }
-                }
-
-                if (response.characters && response.characters.length > 0 && settings.isAutoCharacterDetectionEnabled) {
-                    onAddCharacters(response.characters);
-                }
-
+            const summary = await translateChapterBatch(chaptersToTranslate);
+            if (summary.translatedCount > 0) {
                 setResult({
-                    translatedCount,
-                    charactersFound: response.characters?.length || 0
+                    translatedCount: summary.translatedCount,
+                    charactersFound: summary.charactersFound
                 });
             }
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'An unexpected error occurred');
+        } finally {
+            finishBatchSession();
         }
-
-        onBatchComplete();
     };
 
     const handleClose = () => {
@@ -579,6 +576,7 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
         setSelectedChapterIds(new Set());
         setError(null);
         setResult(null);
+        setIsAutoBatching(false);
         setRangeStart('');
         setRangeEnd('');
         // Local streaming text can be reset since parent tracks it independently
@@ -591,30 +589,6 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
     const selectedBatchStats = useMemo(() => {
         const selectedChapters = sortedChapters.filter(ch => selectedChapterIds.has(ch.id));
         const totalChars = selectedChapters.reduce((sum, ch) => sum + (ch.originalText?.length || 0), 0);
-
-        // Get unique glossary and character matches across all selected chapters
-        const glossarySet = new Set<string>();
-        const characterSet = new Set<string>();
-
-        for (const chapter of selectedChapters) {
-            const stats = allChapterStats[chapter.id];
-            if (stats) {
-                // We count unique matches per chapter, so we need to track which matched
-                glossarySet.add(`${chapter.id}-g-${stats.glossaryCount}`);
-                characterSet.add(`${chapter.id}-c-${stats.characterCount}`);
-            }
-        }
-
-        // Sum up the counts from each chapter
-        let totalGlossary = 0;
-        let totalCharacters = 0;
-        for (const chapter of selectedChapters) {
-            const stats = allChapterStats[chapter.id];
-            if (stats) {
-                totalGlossary = Math.max(totalGlossary, stats.glossaryCount); // Use max as unique count
-                totalCharacters = Math.max(totalCharacters, stats.characterCount);
-            }
-        }
 
         // Actually compute properly - filter entries that match ANY selected chapter
         const { filteredGlossary, filteredCharacters } = filterEntriesForChapters(selectedChapters);
@@ -654,16 +628,31 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
                             Please connect to the API first before translating
                         </div>
                     )}
-                    {/* Translate Next Batch - prominent button */}
-                    <button
-                        onClick={handleTranslateNextBatch}
-                        disabled={isTranslating || untranslatedChapters.length === 0 || !isConnected}
-                        className="w-full flex items-center justify-center gap-2 text-sm font-semibold px-4 py-2.5 rounded-lg bg-[var(--accent-primary)] hover:bg-[var(--accent-secondary)] text-[var(--text-on-accent)] transition-colors disabled:opacity-50"
-                        title={!isConnected ? 'Please connect to the API first' : ''}
-                    >
-                        {isTranslating ? <LoadingSpinner /> : <PlayIcon />}
-                        Translate Next {Math.min(settings.batchSize, untranslatedChapters.length)} Chapters
-                    </button>
+                    {/* Batch actions */}
+                    <div className="grid grid-cols-2 gap-2">
+                        <button
+                            onClick={handleTranslateNextBatch}
+                            disabled={isTranslating || untranslatedChapters.length === 0 || !isConnected}
+                            className="w-full flex items-center justify-center gap-2 text-sm font-semibold px-3 py-2.5 rounded-lg bg-[var(--accent-primary)] hover:bg-[var(--accent-secondary)] text-[var(--text-on-accent)] transition-colors disabled:opacity-50"
+                            title={!isConnected ? 'Please connect to the API first' : ''}
+                        >
+                            {isTranslating && !isAutoBatching ? <LoadingSpinner /> : <PlayIcon />}
+                            Next {Math.min(settings.batchSize, untranslatedChapters.length)}
+                        </button>
+                        <button
+                            onClick={handleAutoBatchTranslate}
+                            disabled={isTranslating || untranslatedChapters.length === 0 || !isConnected}
+                            className="w-full flex items-center justify-center gap-2 text-sm font-semibold px-3 py-2.5 rounded-lg bg-[var(--bg-primary)] border border-[var(--border-primary)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors disabled:opacity-50"
+                            title={!isConnected ? 'Please connect to the API first' : ''}
+                        >
+                            {isTranslating && isAutoBatching ? <LoadingSpinner /> : <PlayIcon />}
+                            Auto-Batch
+                        </button>
+                    </div>
+                    <p className="text-xs text-[var(--text-secondary)]">
+                        Auto-Batch translates remaining chapters in chunks of {settings.batchSize} until complete.
+                        {rangeStart && rangeEnd ? ' Current range will be used.' : ' Set a range first to limit scope.'}
+                    </p>
 
                     {/* Range Selection */}
                     <div className="flex items-center gap-2">
@@ -831,7 +820,7 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
                                 className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white font-semibold px-5 py-2 rounded-lg text-sm transition-colors"
                             >
                                 <StopIcon />
-                                Stop Translating
+                                {isAutoBatching ? 'Stop Auto-Batch' : 'Stop Translating'}
                             </button>
                         ) : (
                             <button

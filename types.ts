@@ -24,6 +24,7 @@ export interface Settings {
   isTranslationMemoryEnabled: boolean;
   isAutoCharacterDetectionEnabled: boolean;
   reasoningEffort: 'auto' | 'minimum' | 'low' | 'medium' | 'high' | 'maximum';
+  requestRetryCount: number;
   // Batch translation settings
   batchSkipTranslated: boolean;
   batchSize: number;
