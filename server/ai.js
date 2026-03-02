@@ -41,6 +41,98 @@ const buildPrompt = (text, glossary, mentionedCharacters) => {
     return { userPrompt };
 };
 
+// Extract text content from OpenAI-compatible response shapes.
+// Some providers expose `choices[0].message.content` (chat),
+// others return `output_text` / `output` (responses),
+// and some Gemini-compatible endpoints return `candidates`.
+const extractResponseText = (data) => {
+    const readContent = (content) => {
+        if (typeof content === 'string') return content;
+        if (!Array.isArray(content)) return '';
+        return content.map((part) => {
+            if (typeof part === 'string') return part;
+            if (part && typeof part.text === 'string') return part.text;
+            if (part && typeof part.output_text === 'string') return part.output_text;
+            if (part && typeof part.content === 'string') return part.content;
+            return '';
+        }).join('');
+    };
+
+    const chatContent = readContent(data?.choices?.[0]?.message?.content);
+    if (chatContent) return chatContent;
+
+    const chatText = typeof data?.choices?.[0]?.text === 'string' ? data.choices[0].text : '';
+    if (chatText) return chatText;
+
+    const outputText = typeof data?.output_text === 'string' ? data.output_text : '';
+    if (outputText) return outputText;
+
+    if (Array.isArray(data?.output)) {
+        const outputJoined = data.output.map((item) => {
+            if (typeof item?.text === 'string') return item.text;
+            return readContent(item?.content);
+        }).join('');
+        if (outputJoined) return outputJoined;
+    }
+
+    if (Array.isArray(data?.candidates)) {
+        const candidateJoined = data.candidates.map((candidate) =>
+            Array.isArray(candidate?.content?.parts)
+                ? candidate.content.parts.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('')
+                : ''
+        ).join('');
+        if (candidateJoined) return candidateJoined;
+    }
+
+    return '';
+};
+
+const extractJsonObjectString = (text) => {
+    if (typeof text !== 'string') return null;
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    return jsonMatch && jsonMatch[0] ? jsonMatch[0] : null;
+};
+
+const normalizeRetryCount = (value) => {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isNaN(parsed)) return 0;
+    return Math.max(0, Math.min(10, parsed));
+};
+
+const shouldRetryStatus = (status) =>
+    status === 408 || status === 425 || status === 429 || status >= 500;
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const fetchWithRetry = async (url, options, retryCount, contextLabel) => {
+    const totalAttempts = retryCount + 1;
+
+    for (let attempt = 0; attempt < totalAttempts; attempt++) {
+        try {
+            const response = await fetch(url, options);
+            const isLastAttempt = attempt === totalAttempts - 1;
+
+            if (!response.ok && shouldRetryStatus(response.status) && !isLastAttempt) {
+                const waitMs = Math.min(3000, 500 * (2 ** attempt));
+                console.warn(`[Retry] ${contextLabel} failed with status ${response.status}. Retrying (${attempt + 2}/${totalAttempts}) in ${waitMs}ms...`);
+                await sleep(waitMs);
+                continue;
+            }
+
+            return response;
+        } catch (error) {
+            const isLastAttempt = attempt === totalAttempts - 1;
+            if (isLastAttempt) throw error;
+            const waitMs = Math.min(3000, 500 * (2 ** attempt));
+            const message = error instanceof Error ? error.message : String(error);
+            console.warn(`[Retry] ${contextLabel} request error: ${message}. Retrying (${attempt + 2}/${totalAttempts}) in ${waitMs}ms...`);
+            await sleep(waitMs);
+        }
+    }
+
+    throw new Error(`${contextLabel} failed after ${totalAttempts} attempts.`);
+};
+
 // Get OpenAI-compatible models
 router.post('/openai-models', async (req, res) => {
     const { endpoint, apiKey } = req.body;
@@ -131,25 +223,26 @@ router.post('/models', async (req, res) => {
 
 // Test connection
 router.post('/test-connection', async (req, res) => {
-    const { model, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint } = req.body;
+    const { model, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, requestRetryCount } = req.body;
+    const retryCount = normalizeRetryCount(requestRetryCount);
     const startTime = performance.now();
     try {
         if (provider === 'deepseek') {
             if (!deepseekApiKey) return res.status(400).json({ success: false, message: "DeepSeek API Key is missing." });
             const requestPayload = { model, messages: [{ role: 'user', content: 'Hello' }], max_tokens: 5 };
-            const response = await fetch(DEEPSEEK_API_URL, {
+            const response = await fetchWithRetry(DEEPSEEK_API_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekApiKey}` },
                 body: JSON.stringify(requestPayload)
-            });
+            }, retryCount, 'DeepSeek test connection');
             const data = await response.json();
             if (!response.ok) throw new Error(data.error?.message || 'Connection failed.');
-            logApiCall({ provider: 'DeepSeek', endpoint: '/test-connection', requestPayload, response: data, fullResponseText: data.choices[0].message.content, startTime, endTime: performance.now() });
+            logApiCall({ provider: 'DeepSeek', endpoint: '/test-connection', requestPayload, response: data, fullResponseText: extractResponseText(data), startTime, endTime: performance.now() });
             res.json({ success: true, message: "Connection successful." });
         } else if (provider === 'openrouter') {
             if (!openRouterApiKey) return res.status(400).json({ success: false, message: "OpenRouter API Key is missing." });
             const requestPayload = { model, messages: [{ role: 'user', content: 'Hello' }], max_tokens: 5 };
-            const response = await fetch(OPENROUTER_API_URL, {
+            const response = await fetchWithRetry(OPENROUTER_API_URL, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -158,24 +251,24 @@ router.post('/test-connection', async (req, res) => {
                     'X-Title': 'Lingua Scripter by Subscribe'
                 },
                 body: JSON.stringify(requestPayload)
-            });
+            }, retryCount, 'OpenRouter test connection');
             const data = await response.json();
             if (!response.ok) throw new Error(data.error?.message || 'Connection failed.');
-            logApiCall({ provider: 'OpenRouter', endpoint: '/test-connection', requestPayload, response: data, fullResponseText: data.choices[0].message.content, startTime, endTime: performance.now() });
+            logApiCall({ provider: 'OpenRouter', endpoint: '/test-connection', requestPayload, response: data, fullResponseText: extractResponseText(data), startTime, endTime: performance.now() });
             res.json({ success: true, message: "Connection successful." });
         } else if (provider === 'openai') {
             if (!openaiApiKey) return res.status(400).json({ success: false, message: "OpenAI API Key is missing." });
             if (!openaiEndpoint) return res.status(400).json({ success: false, message: "OpenAI Endpoint URL is missing." });
             const requestPayload = { model, messages: [{ role: 'user', content: 'Hello' }], max_tokens: 5 };
             const apiUrl = `${openaiEndpoint.replace(/\/$/, '')}/v1/chat/completions`;
-            const response = await fetch(apiUrl, {
+            const response = await fetchWithRetry(apiUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiApiKey}` },
                 body: JSON.stringify(requestPayload)
-            });
+            }, retryCount, 'OpenAI test connection');
             const data = await response.json();
             if (!response.ok) throw new Error(data.error?.message || 'Connection failed.');
-            logApiCall({ provider: 'OpenAI', endpoint: '/test-connection', requestPayload, response: data, fullResponseText: data.choices[0].message.content, startTime, endTime: performance.now() });
+            logApiCall({ provider: 'OpenAI', endpoint: '/test-connection', requestPayload, response: data, fullResponseText: extractResponseText(data), startTime, endTime: performance.now() });
             res.json({ success: true, message: "Connection successful." });
         } else { // Gemini
             if (!apiKey) return res.status(400).json({ success: false, message: "Gemini API Key is missing." });
@@ -212,7 +305,8 @@ router.post('/prompt-preview', (req, res) => {
 
 // Translation (non-streaming)
 router.post('/translate', async (req, res) => {
-    const { text, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, projectId, mentionedCharacters, targetLanguage } = req.body;
+    const { text, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, projectId, mentionedCharacters, targetLanguage, requestRetryCount } = req.body;
+    const retryCount = normalizeRetryCount(requestRetryCount);
 
     let finalSystemInstruction = systemInstruction.replace(/\{\{targetLanguage\}\}/g, targetLanguage || 'English');
     if (!systemInstruction.includes('{{targetLanguage}}')) {
@@ -260,14 +354,17 @@ router.post('/translate', async (req, res) => {
                 requestPayload.route = { providers: openRouterModelProviders.split(',').map(p => p.trim()) };
             }
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetchWithRetry(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) }, retryCount, `${providerName} translate`);
             const data = await response.json();
             if (!response.ok) throw new Error(data.error?.message || 'Translation failed.');
 
-            let jsonString = data.choices[0].message.content;
-            const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
-            if (jsonMatch && jsonMatch[0]) {
-                const parsed = JSON.parse(jsonMatch[0]);
+            let jsonString = extractResponseText(data);
+            if (!jsonString) {
+                throw new Error(`${providerName} API returned no readable text content.`);
+            }
+            const jsonObjectString = extractJsonObjectString(jsonString);
+            if (jsonObjectString) {
+                const parsed = JSON.parse(jsonObjectString);
                 translation = parsed.translation || '';
                 newCharacters = parsed.characters || [];
             } else {
@@ -324,10 +421,160 @@ router.post('/translate', async (req, res) => {
     }
 });
 
+// Chapter title translation (single JSON payload)
+router.post('/translate-chapter-titles', async (req, res) => {
+    const {
+        chapters,
+        model,
+        provider,
+        apiKey,
+        deepseekApiKey,
+        openRouterApiKey,
+        openaiApiKey,
+        openaiEndpoint,
+        openRouterModelProviders,
+        targetLanguage,
+        requestRetryCount
+    } = req.body;
+
+    if (!Array.isArray(chapters) || chapters.length === 0) {
+        return res.status(400).json({ error: 'chapters array is required.' });
+    }
+
+    const retryCount = normalizeRetryCount(requestRetryCount);
+    const safeChapters = chapters.map((chapter, index) => ({
+        id: String(chapter?.id || `chapter-${index + 1}`),
+        title: String(chapter?.title || '').trim() || `Chapter ${index + 1}`
+    }));
+
+    const systemInstruction = `You are a translation engine. Translate chapter titles into ${targetLanguage || 'English'}.
+You will receive a JSON object with this schema: {"chapters":[{"id":"...","title":"..."}]}.
+Rules:
+1. Keep every "id" exactly unchanged.
+2. Translate only the "title" values.
+3. Keep the same number of items in the same order.
+4. Return ONLY valid JSON with the exact same schema and no extra text.`;
+
+    const userPrompt = JSON.stringify({ chapters: safeChapters }, null, 2);
+    const startTime = performance.now();
+
+    try {
+        let translatedTitles = [];
+
+        if (provider === 'deepseek' || provider === 'openrouter' || provider === 'openai') {
+            let currentApiKey, apiUrl, providerName, headers;
+
+            if (provider === 'deepseek') {
+                currentApiKey = deepseekApiKey; apiUrl = DEEPSEEK_API_URL; providerName = 'DeepSeek';
+                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
+            } else if (provider === 'openrouter') {
+                currentApiKey = openRouterApiKey; apiUrl = OPENROUTER_API_URL; providerName = 'OpenRouter';
+                headers = {
+                    'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}`,
+                    'HTTP-Referer': 'https://github.com/subscribe-to-my-channel-on-youtube/lingua-scripter',
+                    'X-Title': 'Lingua Scripter by Subscribe'
+                };
+            } else {
+                currentApiKey = openaiApiKey;
+                if (!openaiEndpoint) return res.status(400).json({ error: 'OpenAI Endpoint URL is missing.' });
+                apiUrl = `${openaiEndpoint.replace(/\/$/, '')}/v1/chat/completions`; providerName = 'OpenAI';
+                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
+            }
+
+            if (!currentApiKey) return res.status(400).json({ error: `${providerName} API Key is missing.` });
+
+            const requestPayload = {
+                model,
+                messages: [{ role: 'system', content: systemInstruction }, { role: 'user', content: userPrompt }],
+                temperature: 0.2,
+                response_format: { type: 'json_object' }
+            };
+
+            if (provider === 'openrouter' && openRouterModelProviders?.trim()) {
+                requestPayload.route = { providers: openRouterModelProviders.split(',').map(p => p.trim()) };
+            }
+
+            const response = await fetchWithRetry(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) }, retryCount, `${providerName} translate chapter titles`);
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error?.message || 'Chapter title translation failed.');
+
+            const jsonString = extractResponseText(data);
+            if (!jsonString) throw new Error(`${providerName} API returned no readable text content.`);
+            const jsonObjectString = extractJsonObjectString(jsonString);
+            if (!jsonObjectString) throw new Error('AI did not return valid JSON for chapter titles.');
+
+            const parsed = JSON.parse(jsonObjectString);
+            if (!Array.isArray(parsed?.chapters)) throw new Error('AI returned invalid chapter title response format.');
+
+            translatedTitles = safeChapters.map((original, index) => {
+                const fromResponse = parsed.chapters.find((item) => String(item?.id) === original.id) || parsed.chapters[index];
+                const translatedTitle = typeof fromResponse?.title === 'string' && fromResponse.title.trim()
+                    ? fromResponse.title.trim()
+                    : original.title;
+                return { id: original.id, translatedTitle };
+            });
+
+            logApiCall({ provider: providerName, endpoint: '/translate-chapter-titles', requestPayload, response: data, fullResponseText: jsonObjectString, startTime, endTime: performance.now() });
+        } else {
+            if (!apiKey) return res.status(400).json({ error: "Gemini API Key is missing." });
+
+            const requestPayload = {
+                model,
+                contents: userPrompt,
+                safetySettings: buildSafetySettings(),
+                config: {
+                    systemInstruction,
+                    temperature: 0.2,
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: Type.OBJECT,
+                        properties: {
+                            chapters: {
+                                type: Type.ARRAY,
+                                items: {
+                                    type: Type.OBJECT,
+                                    properties: {
+                                        id: { type: Type.STRING },
+                                        title: { type: Type.STRING }
+                                    },
+                                    required: ['id', 'title']
+                                }
+                            }
+                        },
+                        required: ['chapters']
+                    }
+                }
+            };
+
+            const ai = new GoogleGenAI({ apiKey });
+            const response = await ai.models.generateContent(requestPayload);
+            const jsonString = response.text.trim();
+            const parsed = JSON.parse(jsonString);
+            if (!Array.isArray(parsed?.chapters)) throw new Error('AI returned invalid chapter title response format.');
+
+            translatedTitles = safeChapters.map((original, index) => {
+                const fromResponse = parsed.chapters.find((item) => String(item?.id) === original.id) || parsed.chapters[index];
+                const translatedTitle = typeof fromResponse?.title === 'string' && fromResponse.title.trim()
+                    ? fromResponse.title.trim()
+                    : original.title;
+                return { id: original.id, translatedTitle };
+            });
+
+            logApiCall({ provider: 'Gemini', endpoint: '/translate-chapter-titles', requestPayload, response, fullResponseText: jsonString, startTime, endTime: performance.now() });
+        }
+
+        res.json({ titles: translatedTitles });
+    } catch (error) {
+        console.error('Chapter title translation failed:', error);
+        res.status(500).json({ error: error.message || 'Failed to translate chapter titles.' });
+    }
+});
+
 // Batch Translation - combines multiple chapters in one request using the SAME simple JSON format as single translation
 // This approach saves API requests while maintaining compatibility with all providers
 router.post('/translate-batch', async (req, res) => {
-    const { chapters, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, mentionedCharacters, targetLanguage } = req.body;
+    const { chapters, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, mentionedCharacters, targetLanguage, requestRetryCount } = req.body;
+    const retryCount = normalizeRetryCount(requestRetryCount);
 
     if (!chapters || !Array.isArray(chapters) || chapters.length === 0) {
         return res.status(400).json({ error: 'chapters array is required' });
@@ -404,7 +651,7 @@ In addition to the translation, identify all characters across ALL chapters. For
 
             console.log(`[Batch Translation] Calling ${providerName} API`);
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetchWithRetry(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) }, retryCount, `${providerName} batch translate`);
 
             // Check content type before parsing
             const contentType = response.headers.get('content-type');
@@ -419,10 +666,13 @@ In addition to the translation, identify all characters across ALL chapters. For
                 throw new Error(data.error?.message || 'Batch translation failed.');
             }
 
-            let jsonString = data.choices[0].message.content;
-            const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
-            if (jsonMatch && jsonMatch[0]) {
-                const parsed = JSON.parse(jsonMatch[0]);
+            let jsonString = extractResponseText(data);
+            if (!jsonString) {
+                throw new Error(`${providerName} API returned no readable text content.`);
+            }
+            const jsonObjectString = extractJsonObjectString(jsonString);
+            if (jsonObjectString) {
+                const parsed = JSON.parse(jsonObjectString);
                 fullTranslation = parsed.translation || '';
                 allCharacters = parsed.characters || [];
             } else {
@@ -514,7 +764,8 @@ In addition to the translation, identify all characters across ALL chapters. For
 
 // Batch Translation (streaming) - streams translation with chapter markers to prevent timeouts
 router.post('/translate-batch-stream', async (req, res) => {
-    const { chapters, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, mentionedCharacters, targetLanguage } = req.body;
+    const { chapters, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, mentionedCharacters, targetLanguage, requestRetryCount } = req.body;
+    const retryCount = normalizeRetryCount(requestRetryCount);
 
     if (!chapters || !Array.isArray(chapters) || chapters.length === 0) {
         return res.status(400).json({ error: 'chapters array is required' });
@@ -588,7 +839,7 @@ Do NOT output any JSON. Just output the translated text with the chapter markers
 
             console.log(`[Batch Stream] Calling ${providerName} API with streaming`);
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetchWithRetry(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) }, retryCount, `${providerName} batch stream`);
 
             // Check for non-streaming error response
             const contentType = response.headers.get('content-type');
@@ -694,7 +945,8 @@ Do NOT output any JSON. Just output the translated text with the chapter markers
 
 // Translation (streaming)
 router.post('/translate-stream', async (req, res) => {
-    const { text, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, mentionedCharacters, targetLanguage } = req.body;
+    const { text, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, mentionedCharacters, targetLanguage, requestRetryCount } = req.body;
+    const retryCount = normalizeRetryCount(requestRetryCount);
 
     let finalSystemInstruction = systemInstruction.replace(/\{\{targetLanguage\}\}/g, targetLanguage || 'English');
     if (!systemInstruction.includes('{{targetLanguage}}')) {
@@ -740,7 +992,7 @@ router.post('/translate-stream', async (req, res) => {
                 requestPayload.route = { providers: openRouterModelProviders.split(',').map(p => p.trim()) };
             }
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetchWithRetry(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) }, retryCount, `${providerName} translate stream`);
             if (!response.ok) {
                 const errorData = await response.json();
                 throw new Error(errorData.error?.message || 'Streaming translation failed.');
@@ -832,7 +1084,8 @@ router.post('/translate-stream', async (req, res) => {
 
 // Find phrases (for glossary)
 router.post('/find-phrases', async (req, res) => {
-    const { originalText, translatedText, selectedTranslations, model, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint } = req.body;
+    const { originalText, translatedText, selectedTranslations, model, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, requestRetryCount } = req.body;
+    const retryCount = normalizeRetryCount(requestRetryCount);
 
     const systemInstruction = `You are an expert linguistic analysis tool. Your task is to find the corresponding phrases in an original text given its translation and a list of selected translated phrases. Respond ONLY with a valid JSON object and nothing else. The JSON object should contain an 'entries' key, which holds an array of objects. Each object in the array should have 'translation' and 'original' keys. The 'original' value should be the exact, unmodified phrase from the original text. If a corresponding phrase cannot be found for a given translation, omit it from the array. Do not include any explanatory text, markdown formatting, or anything besides the JSON object.`;
     const userPrompt = `
@@ -865,14 +1118,15 @@ Respond with a JSON object in the format: {"entries": [{"translation": "...", "o
 
             const requestPayload = { model, messages: [{ role: 'system', content: systemInstruction }, { role: 'user', content: userPrompt }], temperature: 0.1, response_format: { type: 'json_object' } };
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetchWithRetry(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) }, retryCount, `${providerName} find phrases`);
             const data = await response.json();
             if (!response.ok) throw new Error(data.error?.message || 'AI lookup failed.');
 
-            let jsonString = data.choices[0].message.content;
-            const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
-            if (!jsonMatch || !jsonMatch[0]) throw new Error("AI did not return a valid JSON object.");
-            jsonString = jsonMatch[0];
+            let jsonString = extractResponseText(data);
+            if (!jsonString) throw new Error(`${providerName} API returned no readable text content.`);
+            const jsonObjectString = extractJsonObjectString(jsonString);
+            if (!jsonObjectString) throw new Error("AI did not return a valid JSON object.");
+            jsonString = jsonObjectString;
 
             logApiCall({ provider: providerName, endpoint: '/find-phrases', requestPayload, response: data, fullResponseText: jsonString, startTime, endTime: performance.now() });
             res.json(JSON.parse(jsonString));
@@ -904,7 +1158,8 @@ Respond with a JSON object in the format: {"entries": [{"translation": "...", "o
 
 // Analyze characters
 router.post('/analyze-characters', async (req, res) => {
-    const { originalText, model, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, targetLanguage } = req.body;
+    const { originalText, model, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, targetLanguage, requestRetryCount } = req.body;
+    const retryCount = normalizeRetryCount(requestRetryCount);
 
     const systemInstruction = `Analyze the provided text to identify all characters. For each character, provide their original name, their name translated into ${targetLanguage || 'English'}, their gender (e.g., "Male", "Female", "Non-binary", or "Unknown"), and common pronouns (e.g., "he/him", "she/her", "they/them"). Respond ONLY with a valid JSON object. The object must have a single key "characters" which is an array of objects. Each object in the array should have "name", "translatedName", "gender", and "pronouns" keys. The 'name' field must be the original, raw name from the source text. If no characters are found, return an empty array. Do not include any explanatory text, markdown formatting, or anything besides the JSON object.`;
     const userPrompt = `Text to analyze:\n---\n${originalText}\n---\n`;
@@ -932,14 +1187,15 @@ router.post('/analyze-characters', async (req, res) => {
 
             const requestPayload = { model, messages: [{ role: 'system', content: systemInstruction }, { role: 'user', content: userPrompt }], temperature: 0.1, response_format: { type: 'json_object' } };
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetchWithRetry(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) }, retryCount, `${providerName} analyze characters`);
             const data = await response.json();
             if (!response.ok) throw new Error(data.error?.message || 'AI analysis failed.');
 
-            let jsonString = data.choices[0].message.content;
-            const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
-            if (!jsonMatch || !jsonMatch[0]) throw new Error("AI did not return a valid JSON object for character analysis.");
-            jsonString = jsonMatch[0];
+            let jsonString = extractResponseText(data);
+            if (!jsonString) throw new Error(`${providerName} API returned no readable text content.`);
+            const jsonObjectString = extractJsonObjectString(jsonString);
+            if (!jsonObjectString) throw new Error("AI did not return a valid JSON object for character analysis.");
+            jsonString = jsonObjectString;
 
             logApiCall({ provider: providerName, endpoint: '/analyze-characters', requestPayload, response: data, fullResponseText: jsonString, startTime, endTime: performance.now() });
             res.json(JSON.parse(jsonString));

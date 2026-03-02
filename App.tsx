@@ -55,6 +55,7 @@ const StatisticsDashboard = React.lazy(() => import('./components/StatisticsDash
 const BackupRestoreModal = React.lazy(() => import('./components/BackupRestoreModal'));
 const ImportModal = React.lazy(() => import('./components/ImportModal'));
 const BatchTranslateModal = React.lazy(() => import('./components/BatchTranslateModal'));
+const BatchTranslateTitlesModal = React.lazy(() => import('./components/BatchTranslateTitlesModal'));
 
 // Import types separately (not lazy-loaded)
 import type { ProjectBackup } from './components/BackupRestoreModal';
@@ -101,6 +102,7 @@ export default function App() {
   const [isBackupRestoreOpen, setIsBackupRestoreOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [isBatchTranslateOpen, setIsBatchTranslateOpen] = useState(false);
+  const [isBatchTitleTranslateOpen, setIsBatchTitleTranslateOpen] = useState(false);
   const [isChapterListOpen, setIsChapterListOpen] = useState(false);
   const chapterListRef = useRef<HTMLDivElement>(null);
 
@@ -881,6 +883,7 @@ export default function App() {
           onOpenExportModal={() => setIsExportModalOpen(true)}
           onOpenImportModal={() => setIsImportModalOpen(true)}
           onOpenBatchTranslate={() => setIsBatchTranslateOpen(true)}
+          onOpenBatchTitleTranslate={() => setIsBatchTitleTranslateOpen(true)}
           activeGlossaryTerms={activeGlossaryTerms}
           activeCharacters={activeCharacters}
         />
@@ -1201,6 +1204,19 @@ export default function App() {
             onBatchStart={handleBatchTranslationStart}
             onBatchProgress={handleBatchTranslationProgress}
             onBatchComplete={handleBatchTranslationComplete}
+            isConnected={connectionStatus === 'connected'}
+          />
+        )}
+      </Suspense>
+
+      <Suspense fallback={<ModalLoader />}>
+        {isBatchTitleTranslateOpen && activeProjectId && (
+          <BatchTranslateTitlesModal
+            isOpen={isBatchTitleTranslateOpen}
+            onClose={() => setIsBatchTitleTranslateOpen(false)}
+            chapters={projectChapters}
+            settings={settings}
+            onUpdateChapter={updateChapter}
             isConnected={connectionStatus === 'connected'}
           />
         )}

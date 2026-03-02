@@ -26,6 +26,7 @@ const DEFAULT_SETTINGS: Settings = {
   isTranslationMemoryEnabled: true,
   isAutoCharacterDetectionEnabled: true,
   reasoningEffort: 'auto',
+  requestRetryCount: 0,
   batchSkipTranslated: true,
   batchSize: 10,
 };

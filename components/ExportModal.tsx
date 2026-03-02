@@ -166,6 +166,22 @@ const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, project, cha
     setExportError(null);
 
     try {
+      const readErrorMessage = async (response: Response) => {
+        const fallback = `Request failed with status ${response.status}`;
+        try {
+          const rawText = await response.text();
+          if (!rawText) return fallback;
+          try {
+            const parsed = JSON.parse(rawText);
+            return parsed?.error || parsed?.message || fallback;
+          } catch {
+            return rawText.slice(0, 300);
+          }
+        } catch {
+          return fallback;
+        }
+      };
+
       const response = await fetch('/api/export-epub', {
         method: 'POST',
         headers: {
@@ -180,8 +196,18 @@ const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, project, cha
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to generate EPUB');
+        const message = await readErrorMessage(response);
+        throw new Error(message || 'Failed to generate EPUB');
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+      const isBinaryEpub =
+        contentType.includes('application/epub+zip') ||
+        contentType.includes('application/octet-stream');
+
+      if (!isBinaryEpub) {
+        const message = await readErrorMessage(response);
+        throw new Error(message || 'Server returned an invalid EPUB response.');
       }
 
       // Get the blob and create download link
