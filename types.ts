@@ -76,3 +76,12 @@ export interface Preset {
   name: string;
   settings: PresetSettings;
 }
+
+// Batch translation progress types (shared between App, BatchTranslateModal, and useBatchTranslator hook)
+export type BatchChapterStatus = 'pending' | 'translating' | 'completed' | 'error';
+
+export interface BatchTranslationProgress {
+  chapterId: string;
+  status: BatchChapterStatus;
+  streamingText?: string;
+}

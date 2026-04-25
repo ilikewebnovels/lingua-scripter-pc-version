@@ -37,7 +37,7 @@ const GlossaryAiModal: React.FC<GlossaryAiModalProps> = ({ isOpen, selections, o
     }
 
     return (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 animate-fade-in">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60] animate-fade-in">
             <div className="bg-[var(--bg-secondary)] rounded-md p-4 shadow-lg w-full max-w-2xl">
                 <h3 className="text-lg font-bold text-[var(--accent-primary)] mb-4">Selected Terms for AI Glossary</h3>
                 <div className="max-h-96 overflow-y-auto custom-scrollbar">

@@ -17,17 +17,9 @@ import { useProjects } from './hooks/useProjects';
 import { useChapters } from './hooks/useChapters';
 import { useTranslationMemory } from './hooks/useTranslationMemory';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
+import { useBatchTranslator } from './hooks/useBatchTranslator';
 import { translateText, translateTextStream, testConnection, findOriginalPhrases, analyzeForCharacters } from './services/geminiService';
-import { GlossaryEntry, Project, Character } from './types';
-
-// Batch translation progress type
-export type BatchChapterStatus = 'pending' | 'translating' | 'completed' | 'error';
-
-export interface BatchTranslationProgress {
-  chapterId: string;
-  status: BatchChapterStatus;
-  streamingText?: string;
-}
+import { GlossaryEntry, Project, Character, BatchChapterStatus, BatchTranslationProgress } from './types';
 import { TokenizerModel } from './utils/tokenizer';
 import {
   MenuIcon,
@@ -198,6 +190,16 @@ export default function App() {
   // Effect for fullscreen keyboard navigation
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      // Don't navigate if user has glossary selections active (likely interacting with them)
+      if (selectedWords.length > 0) return;
+      // Don't navigate if focus is in an input/textarea/contenteditable (e.g., glossary modal)
+      const active = document.activeElement;
+      if (active && (
+        active.tagName === 'INPUT' ||
+        active.tagName === 'TEXTAREA' ||
+        (active as HTMLElement).isContentEditable
+      )) return;
+
       if (event.key === 'ArrowLeft') {
         handleGoToPreviousChapter();
       } else if (event.key === 'ArrowRight') {
@@ -212,7 +214,7 @@ export default function App() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isTranslatedFullscreen, handleGoToPreviousChapter, handleGoToNextChapter]);
+  }, [isTranslatedFullscreen, handleGoToPreviousChapter, handleGoToNextChapter, selectedWords.length]);
 
   // Effect to detect which glossary/character entries are in the text (DEBOUNCED + OPTIMIZED)
   // Use deferred value to avoid blocking during typing
@@ -622,8 +624,6 @@ export default function App() {
     }, 2000);
   }, []);
 
-
-
   // Handler for restoring a project backup
   const handleRestoreProject = useCallback(async (backup: ProjectBackup) => {
     // Create a new project with a modified name to avoid conflicts
@@ -733,6 +733,25 @@ export default function App() {
       console.warn('[App] Cannot add characters - no active project!');
     }
   }, [activeProjectId, addCharacters]);
+
+  // Batch Translator hook - shared between BatchTranslateModal and reading mode.
+  // Placed AFTER handleAddCharacters to avoid TDZ (Temporal Dead Zone) ReferenceError.
+  const batchTranslator = useBatchTranslator({
+    settings,
+    glossary: activeGlossary,
+    characterDB: activeCharacterDB,
+    onUpdateChapter: updateChapter,
+    onAddCharacters: handleAddCharacters,
+    onBatchStart: handleBatchTranslationStart,
+    onBatchProgress: handleBatchTranslationProgress,
+    onBatchComplete: handleBatchTranslationComplete,
+  });
+
+  // Handler for reading-mode "Translate Next N" button
+  const handleReadingModeTranslateNext = useCallback(() => {
+    if (!activeProjectId || isBatchTranslating || connectionStatus !== 'connected') return;
+    batchTranslator.runNextBatch(projectChapters);
+  }, [activeProjectId, isBatchTranslating, connectionStatus, batchTranslator, projectChapters]);
 
   const handleRemoveCharacter = useCallback((id: string) => {
     if (activeProjectId) {
@@ -1193,14 +1212,16 @@ export default function App() {
             glossary={activeGlossary}
             characterDB={activeCharacterDB}
             settings={settings}
-            onUpdateChapter={updateChapter}
-            onAddCharacters={handleAddCharacters}
             // Batch state props for parent sync
             isBatchTranslating={isBatchTranslating}
             batchChapterStatus={batchChapterStatus}
-            onBatchStart={handleBatchTranslationStart}
-            onBatchProgress={handleBatchTranslationProgress}
-            onBatchComplete={handleBatchTranslationComplete}
+            // Hook-provided actions
+            runBatch={batchTranslator.runBatch}
+            runNextBatch={batchTranslator.runNextBatch}
+            abortBatch={batchTranslator.abort}
+            batchError={batchTranslator.error}
+            batchResult={batchTranslator.result}
+            clearBatchStatus={batchTranslator.clearStatus}
             isConnected={connectionStatus === 'connected'}
           />
         )}
@@ -1256,6 +1277,33 @@ export default function App() {
               >
                 Next Page
               </button>
+              {(() => {
+                const untranslatedCount = projectChapters.filter(ch => !ch.translatedText?.trim()).length;
+                const nextBatchCount = Math.min(settings.batchSize, untranslatedCount);
+                const disabled = isBatchTranslating || untranslatedCount === 0 || connectionStatus !== 'connected';
+                const tooltip = connectionStatus !== 'connected'
+                  ? 'Please connect to the API first'
+                  : untranslatedCount === 0
+                    ? 'All chapters are already translated'
+                    : `Translate the next ${nextBatchCount} untranslated chapter${nextBatchCount !== 1 ? 's' : ''}`;
+                return (
+                  <button
+                    onClick={handleReadingModeTranslateNext}
+                    disabled={disabled}
+                    title={tooltip}
+                    className="flex items-center gap-2 px-3 py-2 rounded-md text-sm font-semibold bg-[var(--accent-primary)] hover:bg-[var(--accent-secondary)] text-[var(--text-on-accent)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isBatchTranslating ? (
+                      <>
+                        <LoadingSpinner />
+                        <span>Translating {batchProgress.current}/{batchProgress.total}…</span>
+                      </>
+                    ) : (
+                      <span>Translate Next {nextBatchCount} Chapter{nextBatchCount !== 1 ? 's' : ''}</span>
+                    )}
+                  </button>
+                );
+              })()}
               <button onClick={() => setIsTranslatedFullscreen(false)} title="Exit Fullscreen" className="p-2 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] transition-colors">
                 <CollapseIcon />
               </button>
@@ -1263,18 +1311,44 @@ export default function App() {
           </header>
           <div className="flex-1 overflow-y-auto flex justify-center">
             <div className={`max-w-4xl w-full ${settings.fontFamily}`} style={translatedFullscreenStyle} aria-live="polite">
+              {/* Floating glossary quick-add (when user has selected text in reading mode) */}
+              {selectedWords.length > 0 && (
+                <div className="sticky top-0 z-40 mb-3">
+                  <GlossaryQuickAdd
+                    selections={selectedWords}
+                    isLoading={isFindingOriginal}
+                    onAddFromSelection={handleAddFromSelection}
+                    onClear={() => setSelectedWords([])}
+                    onRemove={handleRemoveSelection}
+                    onEdit={handleEditSelection}
+                  />
+                </div>
+              )}
+              {error && <div className="bg-red-500/10 border border-red-500/30 text-red-400 p-3 rounded-md mb-3 text-sm">{error}</div>}
               {/* Show batch streaming text if viewing currently streaming chapter */}
               {batchStreamingChapterId === activeChapterId && batchStreamingText ? (
                 <div className="relative">
-                  <div className="fixed top-20 right-8 flex items-center gap-1.5 text-xs text-[var(--accent-primary)] bg-[var(--bg-tertiary)] px-3 py-1.5 rounded-md shadow-lg">
+                  <div className="fixed top-20 right-8 flex items-center gap-1.5 text-xs text-[var(--accent-primary)] bg-[var(--bg-tertiary)] px-3 py-1.5 rounded-md shadow-lg z-30">
                     <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-current"></div>
                     Batch translating...
                   </div>
-                  <div className="whitespace-pre-wrap leading-relaxed">{batchStreamingText}</div>
+                  <div onMouseUp={handleTextSelection} className="leading-relaxed">
+                    <CharacterAwareRenderer
+                      text={batchStreamingText}
+                      characters={activeCharacterDB}
+                      language={settings.targetLanguage}
+                    />
+                  </div>
                 </div>
               ) : isLoading && !translatedText ? <LoadingSkeleton />
                 : translatedText ? (
-                  <div className="whitespace-pre-wrap leading-relaxed">{translatedText}</div>
+                  <div onMouseUp={handleTextSelection} className="leading-relaxed">
+                    <CharacterAwareRenderer
+                      text={translatedText}
+                      characters={activeCharacterDB}
+                      language={settings.targetLanguage}
+                    />
+                  </div>
                 ) : <div className="pt-20"><OutputPlaceholder /></div>}
             </div>
           </div>
