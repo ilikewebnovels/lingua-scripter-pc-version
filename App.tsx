@@ -701,12 +701,13 @@ export default function App() {
     const pendingId = pendingAutoSelectProjectIdRef.current;
     if (!pendingId || pendingId !== activeProjectId) return;
     if (activeChapterId) return;
-    if (loadingProjectId === activeProjectId) return; // still loading
-    if (projectChapters.length === 0) {
-      // Project loaded but has no chapters - clear the flag so we don't keep trying.
-      pendingAutoSelectProjectIdRef.current = null;
-      return;
-    }
+    if (loadingProjectId === activeProjectId) return; // fetch in flight
+    // On the first render after handleSelectProject, loadingProjectId is still
+    // the previous render's value and projectChapters is empty (the global
+    // chapters state still holds the OLD project's data, which the filter
+    // rejects). Don't clear the flag on transient-empty; just wait. The effect
+    // re-runs when projectChapters changes once the fetch resolves.
+    if (projectChapters.length === 0) return;
     const project = projects.find(p => p.id === activeProjectId);
     const lastRead = project?.lastChapterId
       ? projectChapters.find(c => c.id === project.lastChapterId)
