@@ -21,6 +21,7 @@ import { useBatchTranslator } from './hooks/useBatchTranslator';
 import { translateText, translateTextStream, testConnection, findOriginalPhrases, analyzeForCharacters } from './services/geminiService';
 import { GlossaryEntry, Project, Character, BatchChapterStatus, BatchTranslationProgress } from './types';
 import { TokenizerModel } from './utils/tokenizer';
+import { buildBoundaryRegex } from './utils/regexBoundary';
 import {
   MenuIcon,
   LogoIcon,
@@ -222,24 +223,16 @@ export default function App() {
 
   // Pre-compile RegExp patterns for glossary and characters (avoids recreation on every check)
   const glossaryPatterns = useMemo(() => {
-    const noBoundaryLanguages = ['Japanese', 'Chinese (Simplified)', 'Korean'];
-    const useBoundaries = settings.sourceLanguage !== 'Auto-detect' && !noBoundaryLanguages.includes(settings.sourceLanguage);
-    const boundary = useBoundaries ? '\\b' : '';
-
     return activeGlossary.map(term => ({
       term,
-      regex: term.original ? new RegExp(`${boundary}${term.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${boundary}`, 'i') : null
+      regex: buildBoundaryRegex(term.original, settings.sourceLanguage)
     })).filter(p => p.regex !== null);
   }, [activeGlossary, settings.sourceLanguage]);
 
   const characterPatterns = useMemo(() => {
-    const noBoundaryLanguages = ['Japanese', 'Chinese (Simplified)', 'Korean'];
-    const useBoundaries = settings.sourceLanguage !== 'Auto-detect' && !noBoundaryLanguages.includes(settings.sourceLanguage);
-    const boundary = useBoundaries ? '\\b' : '';
-
     return activeCharacterDB.map(character => ({
       character,
-      regex: character.name ? new RegExp(`${boundary}${character.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${boundary}`, 'i') : null
+      regex: buildBoundaryRegex(character.name, settings.sourceLanguage)
     })).filter(p => p.regex !== null);
   }, [activeCharacterDB, settings.sourceLanguage]);
 

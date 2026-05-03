@@ -1,5 +1,6 @@
 import React from 'react';
 import { Character } from '../types';
+import { shouldUseBoundariesForTarget, escapeRegex } from '../utils/regexBoundary';
 
 interface CharacterAwareRendererProps {
   text: string;
@@ -17,16 +18,13 @@ const CharacterAwareRenderer: React.FC<CharacterAwareRendererProps> = ({ text, c
       .filter(c => c.translatedName)
       .sort((a, b) => b.translatedName.length - a.translatedName.length);
   
-  const names = sortedCharacters.map(c => c.translatedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  
+  const names = sortedCharacters.map(c => escapeRegex(c.translatedName));
+
   if (names.length === 0) {
       return <div className="whitespace-pre-wrap leading-relaxed">{text}</div>;
   }
 
-  // Conditionally use word boundaries based on language
-  const noBoundaryLanguages = ['Japanese', 'Chinese (Simplified)', 'Korean'];
-  const useBoundaries = !noBoundaryLanguages.includes(language);
-  const boundary = useBoundaries ? '\\b' : '';
+  const boundary = shouldUseBoundariesForTarget(language) ? '\\b' : '';
   const pattern = `(${names.join('|')})`;
   const regex = new RegExp(`${boundary}${pattern}${boundary}`, 'gi');
 

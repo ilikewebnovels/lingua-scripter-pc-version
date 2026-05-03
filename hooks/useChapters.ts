@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { Chapter } from '../types';
 
-const API_URL = 'http://localhost:3001/api';
+const API_URL = '/api';
 
 export const useChapters = () => {
   const [chapters, setChapters] = useState<Chapter[]>([]);

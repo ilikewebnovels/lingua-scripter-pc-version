@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { Chapter, Character, GlossaryEntry, Settings, BatchChapterStatus } from '../types';
 import { translateBatch, translateBatchStream, analyzeForCharacters } from '../services/geminiService';
+import { buildBoundaryRegex } from '../utils/regexBoundary';
 
 // Helper - filter glossary/characters that match any chapter's originalText.
 // Extracted from BatchTranslateModal.tsx (lines 131-195) to be reused by the hook.
@@ -10,33 +11,25 @@ export const filterEntriesForChapters = (
     characterDB: Character[],
     sourceLanguage: string,
 ) => {
-    const noBoundaryLanguages = ['Japanese', 'Chinese (Simplified)', 'Korean'];
-    const useBoundaries = sourceLanguage !== 'Auto-detect' && !noBoundaryLanguages.includes(sourceLanguage);
-    const boundary = useBoundaries ? '\\b' : '';
-
     const combinedText = chaptersToCheck.map(ch => ch.originalText).join('\n');
 
-    const filteredGlossary = glossary.filter(term => {
-        if (!term.original) return false;
-        try {
-            const escaped = term.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const regex = new RegExp(`${boundary}${escaped}${boundary}`, 'i');
-            return regex.test(combinedText);
-        } catch {
-            return false;
-        }
-    });
+    // Pre-compile patterns once
+    const glossaryPatterns = glossary.map(term => ({
+        term,
+        regex: buildBoundaryRegex(term.original, sourceLanguage),
+    }));
+    const characterPatterns = characterDB.map(character => ({
+        character,
+        regex: buildBoundaryRegex(character.name, sourceLanguage),
+    }));
 
-    const filteredCharacters = characterDB.filter(character => {
-        if (!character.name) return false;
-        try {
-            const escaped = character.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const regex = new RegExp(`${boundary}${escaped}${boundary}`, 'i');
-            return regex.test(combinedText);
-        } catch {
-            return false;
-        }
-    });
+    const filteredGlossary = glossaryPatterns
+        .filter(p => p.regex !== null && p.regex.test(combinedText))
+        .map(p => p.term);
+
+    const filteredCharacters = characterPatterns
+        .filter(p => p.regex !== null && p.regex.test(combinedText))
+        .map(p => p.character);
 
     // Per-chapter stats (used by the modal UI)
     const chapterStats: Record<string, { glossaryCount: number; characterCount: number }> = {};
@@ -44,22 +37,11 @@ export const filterEntriesForChapters = (
         let glossaryCount = 0;
         let characterCount = 0;
 
-        for (const term of glossary) {
-            if (!term.original) continue;
-            try {
-                const escaped = term.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const regex = new RegExp(`${boundary}${escaped}${boundary}`, 'i');
-                if (regex.test(chapter.originalText)) glossaryCount++;
-            } catch { /* ignore */ }
+        for (const p of glossaryPatterns) {
+            if (p.regex && p.regex.test(chapter.originalText)) glossaryCount++;
         }
-
-        for (const character of characterDB) {
-            if (!character.name) continue;
-            try {
-                const escaped = character.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const regex = new RegExp(`${boundary}${escaped}${boundary}`, 'i');
-                if (regex.test(chapter.originalText)) characterCount++;
-            } catch { /* ignore */ }
+        for (const p of characterPatterns) {
+            if (p.regex && p.regex.test(chapter.originalText)) characterCount++;
         }
 
         chapterStats[chapter.id] = { glossaryCount, characterCount };

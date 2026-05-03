@@ -1,6 +1,6 @@
 import { GlossaryEntry, Settings, Character } from '../types';
 
-const API_URL = 'http://localhost:3001/api';
+const API_URL = '/api';
 
 export const testConnection = async (settings: Settings): Promise<{ success: boolean; message: string }> => {
     try {

@@ -67,7 +67,7 @@ const StatisticsDashboard: React.FC<StatisticsDashboardProps> = ({
   useEffect(() => {
     if (isOpen) {
       setIsLoading(true);
-      fetch('http://localhost:3001/api/chapters')
+      fetch('/api/chapters')
         .then(res => res.json())
         .then(data => {
           setAllChapters(data);

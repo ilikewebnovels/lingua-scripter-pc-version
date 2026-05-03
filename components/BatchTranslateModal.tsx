@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { Chapter, Character, GlossaryEntry, Settings, BatchChapterStatus } from '../types';
 import { filterEntriesForChapters } from '../hooks/useBatchTranslator';
+import { buildBoundaryRegex } from '../utils/regexBoundary';
 
 interface BatchTranslateModalProps {
     isOpen: boolean;
@@ -74,9 +75,13 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
 
     // Pre-compute regex match stats for all chapters (for UI display)
     const allChapterStats = useMemo(() => {
-        const noBoundaryLanguages = ['Japanese', 'Chinese (Simplified)', 'Korean'];
-        const useBoundaries = settings.sourceLanguage !== 'Auto-detect' && !noBoundaryLanguages.includes(settings.sourceLanguage);
-        const boundary = useBoundaries ? '\\b' : '';
+        // Pre-compile patterns once per render
+        const glossaryRegexes = glossary
+            .map(term => buildBoundaryRegex(term.original, settings.sourceLanguage))
+            .filter((r): r is RegExp => r !== null);
+        const characterRegexes = characterDB
+            .map(character => buildBoundaryRegex(character.name, settings.sourceLanguage))
+            .filter((r): r is RegExp => r !== null);
 
         const stats: Record<string, { glossaryCount: number; characterCount: number }> = {};
 
@@ -84,22 +89,11 @@ const BatchTranslateModal: React.FC<BatchTranslateModalProps> = ({
             let glossaryCount = 0;
             let characterCount = 0;
 
-            for (const term of glossary) {
-                if (!term.original) continue;
-                try {
-                    const escaped = term.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    const regex = new RegExp(`${boundary}${escaped}${boundary}`, 'i');
-                    if (regex.test(chapter.originalText)) glossaryCount++;
-                } catch { /* ignore */ }
+            for (const regex of glossaryRegexes) {
+                if (regex.test(chapter.originalText)) glossaryCount++;
             }
-
-            for (const character of characterDB) {
-                if (!character.name) continue;
-                try {
-                    const escaped = character.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    const regex = new RegExp(`${boundary}${escaped}${boundary}`, 'i');
-                    if (regex.test(chapter.originalText)) characterCount++;
-                } catch { /* ignore */ }
+            for (const regex of characterRegexes) {
+                if (regex.test(chapter.originalText)) characterCount++;
             }
 
             stats[chapter.id] = { glossaryCount, characterCount };

@@ -415,7 +415,7 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
                     {editPic ? (
                       <img src={editPic} alt="New Preview" className="w-full h-full object-cover" />
                     ) : project.profilePic ? (
-                      <img src={`http://localhost:3001${project.profilePic}?t=${project.updatedAt}`} alt={project.name} className="w-full h-full object-cover" />
+                      <img src={`${project.profilePic}?t=${project.updatedAt}`} alt={project.name} className="w-full h-full object-cover" />
                     ) : (
                       <ImageIcon />
                     )}
@@ -464,7 +464,7 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
                     <div className="flex-shrink-0 w-32 h-32 rounded-lg bg-[var(--bg-tertiary)] overflow-hidden flex items-center justify-center border border-[var(--border-primary)] group-hover:border-[var(--accent-primary)] transition-colors">
                       {project.profilePic ? (
                         <img
-                          src={`http://localhost:3001${project.profilePic}?t=${project.updatedAt}`}
+                          src={`${project.profilePic}?t=${project.updatedAt}`}
                           alt={project.name}
                           className="w-full h-full object-cover"
                         />
@@ -575,7 +575,7 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
                           {editPic ? (
                             <img src={editPic} alt="New Preview" className="w-full h-full object-cover" />
                           ) : project.profilePic ? (
-                            <img src={`http://localhost:3001${project.profilePic}?t=${project.updatedAt}`} alt={project.name} className="w-full h-full object-cover" />
+                            <img src={`${project.profilePic}?t=${project.updatedAt}`} alt={project.name} className="w-full h-full object-cover" />
                           ) : (
                             <ImageIcon />
                           )}
@@ -616,7 +616,7 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
                       <div className={`${isHeaderCollapsed ? 'w-48 h-48' : 'w-40 h-40'} rounded-xl overflow-hidden bg-[var(--bg-tertiary)] flex items-center justify-center border border-[var(--border-primary)] transition-all`}>
                         {project.profilePic ? (
                           <img
-                            src={`http://localhost:3001${project.profilePic}?t=${project.updatedAt}`}
+                            src={`${project.profilePic}?t=${project.updatedAt}`}
                             alt={project.name}
                             className="w-full h-full object-cover"
                           />
@@ -710,7 +710,7 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
                       {editPic ? (
                         <img src={editPic} alt="New Preview" className="w-full h-full object-cover" />
                       ) : project.profilePic ? (
-                        <img src={`http://localhost:3001${project.profilePic}?t=${project.updatedAt}`} alt={project.name} className="w-full h-full object-cover" />
+                        <img src={`${project.profilePic}?t=${project.updatedAt}`} alt={project.name} className="w-full h-full object-cover" />
                       ) : (
                         <ImageIcon />
                       )}
@@ -750,7 +750,7 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
                     <div className="w-20 h-20 rounded-lg overflow-hidden bg-[var(--bg-tertiary)] flex items-center justify-center border border-[var(--border-primary)]">
                       {project.profilePic ? (
                         <img
-                          src={`http://localhost:3001${project.profilePic}?t=${project.updatedAt}`}
+                          src={`${project.profilePic}?t=${project.updatedAt}`}
                           alt={project.name}
                           className="w-full h-full object-cover"
                         />

@@ -51,7 +51,9 @@ const rotateBackups = async (fileName, content) => {
         await ensureDir(BACKUPS_DIR);
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
         const backupPath = path.join(BACKUPS_DIR, `${fileName}.${ts}`);
-        await fs.writeFile(backupPath, content, 'utf-8');
+        const tmpBackupPath = `${backupPath}.tmp`;
+        await fs.writeFile(tmpBackupPath, content, 'utf-8');
+        await fs.rename(tmpBackupPath, backupPath);
 
         // Prune old backups for this file
         const entries = await fs.readdir(BACKUPS_DIR);
@@ -123,6 +125,79 @@ export const writeData = async (fileName, data) => {
     rotateBackups(fileName, serialised).catch(() => {});
 };
 
+// SSRF guard. The user-supplied `openaiEndpoint` is fetched server-side, so a
+// malicious or careless value could target internal infrastructure
+// (cloud metadata, localhost, RFC1918, link-local). We only allow http(s) and
+// reject hostnames that look private/loopback/link-local.
+const PRIVATE_HOST_PATTERNS = [
+    /^localhost$/i,
+    /^127\./,
+    /^0\./,
+    /^10\./,
+    /^192\.168\./,
+    /^172\.(1[6-9]|2\d|3[01])\./,
+    /^169\.254\./,            // link-local / cloud metadata (AWS/GCP/Azure all use 169.254.169.254)
+    /^::1$/,
+    /^fe80:/i,
+    /^fc[0-9a-f]{2}:/i,       // IPv6 ULA
+    /^fd[0-9a-f]{2}:/i,       // IPv6 ULA
+];
+
+export const validateExternalEndpoint = (raw) => {
+    if (!raw || typeof raw !== 'string') {
+        return { ok: false, error: 'Endpoint URL is missing.' };
+    }
+    let url;
+    try {
+        url = new URL(raw);
+    } catch {
+        return { ok: false, error: 'Invalid endpoint URL.' };
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        return { ok: false, error: `Endpoint protocol "${url.protocol}" is not allowed.` };
+    }
+    const host = url.hostname;
+    if (!host) {
+        return { ok: false, error: 'Endpoint URL has no host.' };
+    }
+    for (const pat of PRIVATE_HOST_PATTERNS) {
+        if (pat.test(host)) {
+            return { ok: false, error: `Endpoint host "${host}" is not allowed (private/loopback range).` };
+        }
+    }
+    return { ok: true };
+};
+
+// Keys whose values must never reach stdout/log files.
+const SENSITIVE_KEYS = new Set([
+    'apiKey',
+    'deepseekApiKey',
+    'openRouterApiKey',
+    'openaiApiKey',
+    'authorization',
+    'Authorization',
+]);
+
+/**
+ * Deep-clone a payload, replacing sensitive values with a redaction marker.
+ * Handles nested objects/arrays. Non-mutating.
+ */
+const redactSensitive = (value) => {
+    if (Array.isArray(value)) return value.map(redactSensitive);
+    if (value && typeof value === 'object') {
+        const out = {};
+        for (const [k, v] of Object.entries(value)) {
+            if (SENSITIVE_KEYS.has(k) && typeof v === 'string' && v.length > 0) {
+                out[k] = `[REDACTED:${v.length}chars]`;
+            } else {
+                out[k] = redactSensitive(v);
+            }
+        }
+        return out;
+    }
+    return value;
+};
+
 /**
  * API call logger for debugging
  */
@@ -130,7 +205,7 @@ export function logApiCall({ provider, endpoint, requestPayload, response, fullR
     const streamLabel = isStreaming ? " (STREAMING)" : "";
     const latency = ((endTime - startTime) / 1000).toFixed(2);
     let logMessage = `\n\n--- [${provider}] REQUEST TO ${endpoint}${streamLabel} ---\n`;
-    logMessage += `Request Body: ${JSON.stringify(requestPayload, null, 2)}\n`;
+    logMessage += `Request Body: ${JSON.stringify(redactSensitive(requestPayload), null, 2)}\n`;
     logMessage += `\n--- [${provider}] RESPONSE${streamLabel} ---\n`;
     logMessage += `Assistant: ${fullResponseText}\n`;
     logMessage += `\n--- [${provider}] RESPONSE INFO${streamLabel} ---\n`;

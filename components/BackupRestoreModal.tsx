@@ -66,7 +66,7 @@ const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
   // Fetch all chapters when modal opens (for full backup)
   useEffect(() => {
     if (isOpen) {
-      fetch('http://localhost:3001/api/chapters')
+      fetch('/api/chapters')
         .then(res => res.json())
         .then(data => setAllChapters(data))
         .catch(err => console.error('Failed to fetch all chapters:', err));

@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Settings } from '../types';
 
-const API_URL = 'http://localhost:3001/api';
+const API_URL = '/api';
 
 const DEFAULT_SETTINGS: Settings = {
   provider: 'gemini',

@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { GlossaryEntry } from '../types';
 
-const API_URL = 'http://localhost:3001/api';
+const API_URL = '/api';
 
 export const useGlossary = () => {
   const [glossaries, setGlossaries] = useState<Record<string, GlossaryEntry[]>>({});

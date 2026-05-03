@@ -8,6 +8,28 @@ import { CHAPTERS_DIR, ensureDir } from './utils.js';
 
 const router = express.Router();
 
+// Per-project async mutex. Concurrent PUT/POST/DELETE on the same project file
+// would otherwise race (read → modify → write loop). All write paths funnel
+// through `withProjectLock(projectId, fn)` so they serialise.
+const projectLocks = new Map();
+const withProjectLock = async (projectId, fn) => {
+    const prev = projectLocks.get(projectId) || Promise.resolve();
+    // Run fn after prev settles, regardless of whether prev rejected.
+    const next = prev.then(fn, fn);
+    // Future callers wait on the swallow-error tail so a single failure
+    // doesn't poison the chain for everyone else.
+    const tail = next.catch(() => {});
+    projectLocks.set(projectId, tail);
+    try {
+        return await next;
+    } finally {
+        // Drop entry only if we're still the latest tail (i.e., no later caller chained on).
+        if (projectLocks.get(projectId) === tail) {
+            projectLocks.delete(projectId);
+        }
+    }
+};
+
 // Helper: Get file path for a project's chapters
 const getChaptersFilePath = (projectId) => path.join(CHAPTERS_DIR, `${projectId}.json`);
 
@@ -23,11 +45,13 @@ const readProjectChapters = async (projectId) => {
     }
 };
 
-// Helper: Write chapters for a specific project
+// Helper: Write chapters for a specific project (atomic: tmp+rename)
 const writeProjectChapters = async (projectId, chapters) => {
     await ensureDir(CHAPTERS_DIR);
     const filePath = getChaptersFilePath(projectId);
-    await fs.writeFile(filePath, JSON.stringify(chapters, null, 2), 'utf-8');
+    const tmpPath = `${filePath}.tmp`;
+    await fs.writeFile(tmpPath, JSON.stringify(chapters, null, 2), 'utf-8');
+    await fs.rename(tmpPath, filePath);
 };
 
 // Get all chapters (for backward compatibility / backup restore)
@@ -87,23 +111,23 @@ router.post('/batch', async (req, res) => {
 
         const allSavedChapters = [];
 
-        // Process each project
+        // Process each project (serialised per-project to avoid clobbering)
         for (const [projectId, projectNewChapters] of Object.entries(chaptersByProject)) {
-            const existingChapters = await readProjectChapters(projectId);
+            const savedChapters = await withProjectLock(projectId, async () => {
+                const existingChapters = await readProjectChapters(projectId);
 
-            // Get max chapter number for this project
-            const maxChapterNumber = existingChapters.reduce(
-                (max, ch) => Math.max(max, ch.chapterNumber || 0), 0
-            );
+                const maxChapterNumber = existingChapters.reduce(
+                    (max, ch) => Math.max(max, ch.chapterNumber || 0), 0
+                );
 
-            // Assign chapter numbers
-            const savedChapters = projectNewChapters.map((chapter, index) => ({
-                ...chapter,
-                chapterNumber: maxChapterNumber + index + 1
-            }));
+                const assigned = projectNewChapters.map((chapter, index) => ({
+                    ...chapter,
+                    chapterNumber: maxChapterNumber + index + 1
+                }));
 
-            // Write back
-            await writeProjectChapters(projectId, [...existingChapters, ...savedChapters]);
+                await writeProjectChapters(projectId, [...existingChapters, ...assigned]);
+                return assigned;
+            });
             allSavedChapters.push(...savedChapters);
         }
 
@@ -119,17 +143,17 @@ router.post('/', async (req, res) => {
     try {
         const newChapter = req.body;
         const projectId = newChapter.projectId;
-        const chapters = await readProjectChapters(projectId);
-
-        // Auto-increment chapter number
-        const maxChapterNumber = chapters.reduce(
-            (max, ch) => Math.max(max, ch.chapterNumber || 0), 0
-        );
-        newChapter.chapterNumber = maxChapterNumber + 1;
-
-        chapters.push(newChapter);
-        await writeProjectChapters(projectId, chapters);
-        res.status(201).json(newChapter);
+        const saved = await withProjectLock(projectId, async () => {
+            const chapters = await readProjectChapters(projectId);
+            const maxChapterNumber = chapters.reduce(
+                (max, ch) => Math.max(max, ch.chapterNumber || 0), 0
+            );
+            newChapter.chapterNumber = maxChapterNumber + 1;
+            chapters.push(newChapter);
+            await writeProjectChapters(projectId, chapters);
+            return newChapter;
+        });
+        res.status(201).json(saved);
     } catch (error) {
         console.error('Failed to create chapter:', error);
         res.status(500).json({ error: 'Failed to create chapter' });
@@ -138,17 +162,20 @@ router.post('/', async (req, res) => {
 
 // Delete chapters by project ID (must be before /:id)
 router.delete('/by-project/:projectId', async (req, res) => {
+    const projectId = req.params.projectId;
     try {
-        const filePath = getChaptersFilePath(req.params.projectId);
-        await fs.unlink(filePath);
+        await withProjectLock(projectId, async () => {
+            const filePath = getChaptersFilePath(projectId);
+            try {
+                await fs.unlink(filePath);
+            } catch (e) {
+                if (e.code !== 'ENOENT') throw e;
+            }
+        });
         res.status(204).send();
     } catch (error) {
-        if (error.code === 'ENOENT') {
-            res.status(204).send(); // Already gone
-        } else {
-            console.error('Failed to delete project chapters:', error);
-            res.status(500).json({ error: 'Failed to delete chapters' });
-        }
+        console.error('Failed to delete project chapters:', error);
+        res.status(500).json({ error: 'Failed to delete chapters' });
     }
 });
 
@@ -184,21 +211,24 @@ router.put('/:id', async (req, res) => {
             return res.status(404).json({ message: "Chapter not found" });
         }
 
-        const chapters = await readProjectChapters(projectId);
-        const chapterIndex = chapters.findIndex(c => c.id === chapterId);
+        const result = await withProjectLock(projectId, async () => {
+            const chapters = await readProjectChapters(projectId);
+            const chapterIndex = chapters.findIndex(c => c.id === chapterId);
+            if (chapterIndex === -1) return null;
 
-        if (chapterIndex === -1) {
+            chapters[chapterIndex] = {
+                ...chapters[chapterIndex],
+                ...updates,
+                updatedAt: Date.now()
+            };
+            await writeProjectChapters(projectId, chapters);
+            return chapters[chapterIndex];
+        });
+
+        if (!result) {
             return res.status(404).json({ message: "Chapter not found" });
         }
-
-        chapters[chapterIndex] = {
-            ...chapters[chapterIndex],
-            ...updates,
-            updatedAt: Date.now()
-        };
-
-        await writeProjectChapters(projectId, chapters);
-        res.json(chapters[chapterIndex]);
+        res.json(result);
     } catch (error) {
         console.error('Failed to update chapter:', error);
         res.status(500).json({ error: 'Failed to update chapter' });
@@ -217,13 +247,14 @@ router.delete('/:id', async (req, res) => {
         for (const file of files) {
             if (path.extname(file) === '.json') {
                 const projectId = path.basename(file, '.json');
-                const chapters = await readProjectChapters(projectId);
-                const filteredChapters = chapters.filter(c => c.id !== chapterId);
-
-                if (filteredChapters.length !== chapters.length) {
+                const removed = await withProjectLock(projectId, async () => {
+                    const chapters = await readProjectChapters(projectId);
+                    const filteredChapters = chapters.filter(c => c.id !== chapterId);
+                    if (filteredChapters.length === chapters.length) return false;
                     await writeProjectChapters(projectId, filteredChapters);
-                    return res.status(204).send();
-                }
+                    return true;
+                });
+                if (removed) return res.status(204).send();
             }
         }
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Character } from '../types';
 
-const API_URL = 'http://localhost:3001/api';
+const API_URL = '/api';
 
 export const useCharactersDB = () => {
   const [characterDBs, setCharacterDBs] = useState<Record<string, Character[]>>({});

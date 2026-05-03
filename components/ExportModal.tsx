@@ -67,17 +67,28 @@ const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, project, cha
   }, [rangeStart, rangeEnd, projectChapters]);
 
   const generatePrintableHtml = useCallback(() => {
-      // Generate cover image HTML if project has a profile picture
+      const escapeHtml = (str: string) =>
+          str
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#39;');
+
+      const safeProjectName = escapeHtml(project?.name || 'Export');
+
+      // Generate cover image HTML if project has a profile picture.
+      // profilePic comes from the server and is path.basename'd there, so it cannot escape /project_images/.
       const coverImageHtml = project?.profilePic
         ? `<div class="cover-page">
-             <img src="http://localhost:3001${project.profilePic}" alt="${project.name} cover" class="cover-image" />
+             <img src="${escapeHtml(window.location.origin + project.profilePic)}" alt="${safeProjectName} cover" class="cover-image" />
            </div>`
         : '';
 
       let content = `
         <html>
           <head>
-            <title>${project?.name || 'Export'}</title>
+            <title>${safeProjectName}</title>
             <style>
               body { font-family: ${settings.fontFamily === 'font-sans' ? 'sans-serif' : settings.fontFamily === 'font-serif' ? 'serif' : 'monospace'}; font-size: 16px; line-height: 1.6; margin: 40px; }
               .cover-page {
@@ -107,14 +118,15 @@ const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, project, cha
           </head>
           <body>
             ${coverImageHtml}
-            <h1>${project?.name}</h1>
+            <h1>${safeProjectName}</h1>
       `;
 
       chaptersToExport.forEach(chapter => {
-          const sanitizedText = chapter.translatedText.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          const safeTitle = escapeHtml(chapter.title || '');
+          const safeText = escapeHtml(chapter.translatedText || '');
           content += `
-            <h2>Chapter ${chapter.chapterNumber}: ${chapter.title}</h2>
-            <p>${sanitizedText}</p>
+            <h2>Chapter ${chapter.chapterNumber}: ${safeTitle}</h2>
+            <p>${safeText}</p>
           `;
       });
 

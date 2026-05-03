@@ -215,7 +215,7 @@ const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                     <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-[var(--bg-tertiary)] overflow-hidden flex items-center justify-center border border-[var(--border-primary)]">
                       {activeProject.profilePic ? (
                         <img
-                          src={`http://localhost:3001${activeProject.profilePic}?t=${activeProject.updatedAt}`}
+                          src={`${activeProject.profilePic}?t=${activeProject.updatedAt}`}
                           alt={activeProject.name}
                           className="w-full h-full object-cover"
                         />

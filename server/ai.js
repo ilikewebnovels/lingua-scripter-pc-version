@@ -4,7 +4,81 @@
  */
 import express from 'express';
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold, Type } from '@google/genai';
-import { logApiCall } from './utils.js';
+import { logApiCall, validateExternalEndpoint } from './utils.js';
+
+// Small helper: reject obviously SSRF-prone openaiEndpoint values before fetching.
+// Returns true on success, sends an HTTP error and returns false on failure.
+const guardOpenAIEndpoint = (endpoint, res, status = 400) => {
+    const check = validateExternalEndpoint(endpoint);
+    if (!check.ok) {
+        res.status(status).json({ error: check.error });
+        return false;
+    }
+    return true;
+};
+
+// When the client aborts the HTTP request (closes the connection), forward
+// that to upstream provider fetches via an AbortController. Returns the
+// controller so callers can pass `controller.signal` to fetch().
+//
+// We listen on `res` (ServerResponse), NOT `req` (IncomingMessage). After
+// express's body-parser consumes the request body, IncomingMessage queues
+// its own 'close' event via process.nextTick — which would fire as soon as
+// our handler yields to the event loop and abort the upstream fetch before
+// it ever starts. ServerResponse#close, by contrast, only fires when the
+// underlying connection actually terminates.
+const linkClientAbort = (req, res) => {
+    const controller = new AbortController();
+    const onClose = () => {
+        if (!res.writableEnded) controller.abort();
+    };
+    res.on('close', onClose);
+    return controller;
+};
+
+// Resolve the OpenAI-compatible provider config (key/url/headers/name) from
+// the request body. Returns { ok: true, ... } on success, or
+// { ok: false, error, status } describing how to respond. Used by all
+// translate / find-phrases / analyze-characters / test-connection routes.
+const resolveOpenAILikeProvider = (provider, body) => {
+    const { deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint } = body;
+    if (provider === 'deepseek') {
+        if (!deepseekApiKey) return { ok: false, error: 'DeepSeek API Key is missing.', status: 400 };
+        return {
+            ok: true,
+            providerName: 'DeepSeek',
+            apiUrl: DEEPSEEK_API_URL,
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekApiKey}` },
+        };
+    }
+    if (provider === 'openrouter') {
+        if (!openRouterApiKey) return { ok: false, error: 'OpenRouter API Key is missing.', status: 400 };
+        return {
+            ok: true,
+            providerName: 'OpenRouter',
+            apiUrl: OPENROUTER_API_URL,
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${openRouterApiKey}`,
+                'HTTP-Referer': 'https://github.com/subscribe-to-my-channel-on-youtube/lingua-scripter',
+                'X-Title': 'Lingua Scripter by Subscribe',
+            },
+        };
+    }
+    if (provider === 'openai') {
+        if (!openaiApiKey) return { ok: false, error: 'OpenAI API Key is missing.', status: 400 };
+        if (!openaiEndpoint) return { ok: false, error: 'OpenAI Endpoint URL is missing.', status: 400 };
+        const epCheck = validateExternalEndpoint(openaiEndpoint);
+        if (!epCheck.ok) return { ok: false, error: epCheck.error, status: 400 };
+        return {
+            ok: true,
+            providerName: 'OpenAI',
+            apiUrl: `${openaiEndpoint.replace(/\/$/, '')}/v1/chat/completions`,
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiApiKey}` },
+        };
+    }
+    return { ok: false, error: 'Invalid provider.', status: 400 };
+};
 
 const router = express.Router();
 
@@ -47,6 +121,7 @@ router.post('/openai-models', async (req, res) => {
     if (!endpoint || !apiKey) {
         return res.status(400).json({ error: 'Endpoint and API Key are required.' });
     }
+    if (!guardOpenAIEndpoint(endpoint, res)) return;
     try {
         const url = `${endpoint.replace(/\/$/, '')}/v1/models`;
         const response = await fetch(url, {
@@ -131,51 +206,18 @@ router.post('/models', async (req, res) => {
 
 // Test connection
 router.post('/test-connection', async (req, res) => {
-    const { model, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint } = req.body;
+    const { model, provider, apiKey } = req.body;
     const startTime = performance.now();
     try {
-        if (provider === 'deepseek') {
-            if (!deepseekApiKey) return res.status(400).json({ success: false, message: "DeepSeek API Key is missing." });
+        if (provider === 'deepseek' || provider === 'openrouter' || provider === 'openai') {
+            const cfg = resolveOpenAILikeProvider(provider, req.body);
+            if (!cfg.ok) return res.status(cfg.status).json({ success: false, message: cfg.error });
+            const { apiUrl, providerName, headers } = cfg;
             const requestPayload = { model, messages: [{ role: 'user', content: 'Hello' }], max_tokens: 5 };
-            const response = await fetch(DEEPSEEK_API_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekApiKey}` },
-                body: JSON.stringify(requestPayload)
-            });
+            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
             const data = await response.json();
             if (!response.ok) throw new Error(data.error?.message || 'Connection failed.');
-            logApiCall({ provider: 'DeepSeek', endpoint: '/test-connection', requestPayload, response: data, fullResponseText: data.choices[0].message.content, startTime, endTime: performance.now() });
-            res.json({ success: true, message: "Connection successful." });
-        } else if (provider === 'openrouter') {
-            if (!openRouterApiKey) return res.status(400).json({ success: false, message: "OpenRouter API Key is missing." });
-            const requestPayload = { model, messages: [{ role: 'user', content: 'Hello' }], max_tokens: 5 };
-            const response = await fetch(OPENROUTER_API_URL, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${openRouterApiKey}`,
-                    'HTTP-Referer': 'https://github.com/subscribe-to-my-channel-on-youtube/lingua-scripter',
-                    'X-Title': 'Lingua Scripter by Subscribe'
-                },
-                body: JSON.stringify(requestPayload)
-            });
-            const data = await response.json();
-            if (!response.ok) throw new Error(data.error?.message || 'Connection failed.');
-            logApiCall({ provider: 'OpenRouter', endpoint: '/test-connection', requestPayload, response: data, fullResponseText: data.choices[0].message.content, startTime, endTime: performance.now() });
-            res.json({ success: true, message: "Connection successful." });
-        } else if (provider === 'openai') {
-            if (!openaiApiKey) return res.status(400).json({ success: false, message: "OpenAI API Key is missing." });
-            if (!openaiEndpoint) return res.status(400).json({ success: false, message: "OpenAI Endpoint URL is missing." });
-            const requestPayload = { model, messages: [{ role: 'user', content: 'Hello' }], max_tokens: 5 };
-            const apiUrl = `${openaiEndpoint.replace(/\/$/, '')}/v1/chat/completions`;
-            const response = await fetch(apiUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiApiKey}` },
-                body: JSON.stringify(requestPayload)
-            });
-            const data = await response.json();
-            if (!response.ok) throw new Error(data.error?.message || 'Connection failed.');
-            logApiCall({ provider: 'OpenAI', endpoint: '/test-connection', requestPayload, response: data, fullResponseText: data.choices[0].message.content, startTime, endTime: performance.now() });
+            logApiCall({ provider: providerName, endpoint: '/test-connection', requestPayload, response: data, fullResponseText: data.choices[0].message.content, startTime, endTime: performance.now() });
             res.json({ success: true, message: "Connection successful." });
         } else { // Gemini
             if (!apiKey) return res.status(400).json({ success: false, message: "Gemini API Key is missing." });
@@ -213,6 +255,7 @@ router.post('/prompt-preview', (req, res) => {
 // Translation (non-streaming)
 router.post('/translate', async (req, res) => {
     const { text, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, projectId, mentionedCharacters, targetLanguage } = req.body;
+    const abortCtl = linkClientAbort(req, res);
 
     let finalSystemInstruction = systemInstruction.replace(/\{\{targetLanguage\}\}/g, targetLanguage || 'English');
     if (!systemInstruction.includes('{{targetLanguage}}')) {
@@ -228,26 +271,9 @@ router.post('/translate', async (req, res) => {
         let newCharacters = [];
 
         if (provider === 'deepseek' || provider === 'openrouter' || provider === 'openai') {
-            let currentApiKey, apiUrl, providerName, headers;
-
-            if (provider === 'deepseek') {
-                currentApiKey = deepseekApiKey; apiUrl = DEEPSEEK_API_URL; providerName = 'DeepSeek';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            } else if (provider === 'openrouter') {
-                currentApiKey = openRouterApiKey; apiUrl = OPENROUTER_API_URL; providerName = 'OpenRouter';
-                headers = {
-                    'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}`,
-                    'HTTP-Referer': 'https://github.com/subscribe-to-my-channel-on-youtube/lingua-scripter',
-                    'X-Title': 'Lingua Scripter by Subscribe'
-                };
-            } else {
-                currentApiKey = openaiApiKey;
-                if (!openaiEndpoint) return res.status(400).json({ error: 'OpenAI Endpoint URL is missing.' });
-                apiUrl = `${openaiEndpoint.replace(/\/$/, '')}/v1/chat/completions`; providerName = 'OpenAI';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            }
-
-            if (!currentApiKey) return res.status(400).json({ error: `${providerName} API Key is missing.` });
+            const cfg = resolveOpenAILikeProvider(provider, req.body);
+            if (!cfg.ok) return res.status(cfg.status).json({ error: cfg.error });
+            const { apiUrl, providerName, headers } = cfg;
 
             const requestPayload = {
                 model,
@@ -260,7 +286,7 @@ router.post('/translate', async (req, res) => {
                 requestPayload.route = { providers: openRouterModelProviders.split(',').map(p => p.trim()) };
             }
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload), signal: abortCtl.signal });
             const data = await response.json();
             if (!response.ok) throw new Error(data.error?.message || 'Translation failed.');
 
@@ -328,6 +354,7 @@ router.post('/translate', async (req, res) => {
 // This approach saves API requests while maintaining compatibility with all providers
 router.post('/translate-batch', async (req, res) => {
     const { chapters, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, mentionedCharacters, targetLanguage } = req.body;
+    const abortCtl = linkClientAbort(req, res);
 
     if (!chapters || !Array.isArray(chapters) || chapters.length === 0) {
         return res.status(400).json({ error: 'chapters array is required' });
@@ -365,30 +392,9 @@ In addition to the translation, identify all characters across ALL chapters. For
         let allCharacters = [];
 
         if (provider === 'deepseek' || provider === 'openrouter' || provider === 'openai') {
-            let currentApiKey, apiUrl, providerName, headers;
-
-            if (provider === 'deepseek') {
-                currentApiKey = deepseekApiKey; apiUrl = DEEPSEEK_API_URL; providerName = 'DeepSeek';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            } else if (provider === 'openrouter') {
-                currentApiKey = openRouterApiKey; apiUrl = OPENROUTER_API_URL; providerName = 'OpenRouter';
-                headers = {
-                    'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}`,
-                    'HTTP-Referer': 'https://github.com/subscribe-to-my-channel-on-youtube/lingua-scripter',
-                    'X-Title': 'Lingua Scripter by Subscribe'
-                };
-            } else {
-                currentApiKey = openaiApiKey;
-                if (!openaiEndpoint) {
-                    return res.status(400).json({ error: 'OpenAI Endpoint URL is missing.' });
-                }
-                apiUrl = `${openaiEndpoint.replace(/\/$/, '')}/v1/chat/completions`; providerName = 'OpenAI';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            }
-
-            if (!currentApiKey) {
-                return res.status(400).json({ error: `${providerName} API Key is missing.` });
-            }
+            const cfg = resolveOpenAILikeProvider(provider, req.body);
+            if (!cfg.ok) return res.status(cfg.status).json({ error: cfg.error });
+            const { apiUrl, providerName, headers } = cfg;
 
             // SAME request payload structure as single translation
             const requestPayload = {
@@ -404,7 +410,7 @@ In addition to the translation, identify all characters across ALL chapters. For
 
             console.log(`[Batch Translation] Calling ${providerName} API`);
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload), signal: abortCtl.signal });
 
             // Check content type before parsing
             const contentType = response.headers.get('content-type');
@@ -515,6 +521,7 @@ In addition to the translation, identify all characters across ALL chapters. For
 // Batch Translation (streaming) - streams translation with chapter markers to prevent timeouts
 router.post('/translate-batch-stream', async (req, res) => {
     const { chapters, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, mentionedCharacters, targetLanguage } = req.body;
+    const abortCtl = linkClientAbort(req, res);
 
     if (!chapters || !Array.isArray(chapters) || chapters.length === 0) {
         return res.status(400).json({ error: 'chapters array is required' });
@@ -554,26 +561,9 @@ Do NOT output any JSON. Just output the translated text with the chapter markers
 
     try {
         if (provider === 'deepseek' || provider === 'openrouter' || provider === 'openai') {
-            let currentApiKey, apiUrl, providerName, headers;
-
-            if (provider === 'deepseek') {
-                currentApiKey = deepseekApiKey; apiUrl = DEEPSEEK_API_URL; providerName = 'DeepSeek';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            } else if (provider === 'openrouter') {
-                currentApiKey = openRouterApiKey; apiUrl = OPENROUTER_API_URL; providerName = 'OpenRouter';
-                headers = {
-                    'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}`,
-                    'HTTP-Referer': 'https://github.com/subscribe-to-my-channel-on-youtube/lingua-scripter',
-                    'X-Title': 'Lingua Scripter by Subscribe'
-                };
-            } else {
-                currentApiKey = openaiApiKey;
-                if (!openaiEndpoint) throw new Error('OpenAI Endpoint URL is missing.');
-                apiUrl = `${openaiEndpoint.replace(/\/$/, '')}/v1/chat/completions`; providerName = 'OpenAI';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            }
-
-            if (!currentApiKey) throw new Error(`${providerName} API Key is missing.`);
+            const cfg = resolveOpenAILikeProvider(provider, req.body);
+            if (!cfg.ok) throw new Error(cfg.error);
+            const { apiUrl, providerName, headers } = cfg;
 
             const requestPayload = {
                 model,
@@ -588,7 +578,7 @@ Do NOT output any JSON. Just output the translated text with the chapter markers
 
             console.log(`[Batch Stream] Calling ${providerName} API with streaming`);
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload), signal: abortCtl.signal });
 
             // Check for non-streaming error response
             const contentType = response.headers.get('content-type');
@@ -606,6 +596,7 @@ Do NOT output any JSON. Just output the translated text with the chapter markers
             let sseBuffer = '';
 
             while (true) {
+                if (abortCtl.signal.aborted) { try { await reader.cancel(); } catch {} break; }
                 const { done, value } = await reader.read();
                 if (done) {
                     // Flush any remaining data in SSE buffer
@@ -673,6 +664,7 @@ Do NOT output any JSON. Just output the translated text with the chapter markers
 
             let lastChunk;
             for await (const chunk of responseStream) {
+                if (abortCtl.signal.aborted) break;
                 const chunkText = chunk.text;
                 fullResponseText += chunkText;
                 lastChunk = chunk;
@@ -695,6 +687,7 @@ Do NOT output any JSON. Just output the translated text with the chapter markers
 // Translation (streaming)
 router.post('/translate-stream', async (req, res) => {
     const { text, glossary, model, systemInstruction, temperature, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, openRouterModelProviders, mentionedCharacters, targetLanguage } = req.body;
+    const abortCtl = linkClientAbort(req, res);
 
     let finalSystemInstruction = systemInstruction.replace(/\{\{targetLanguage\}\}/g, targetLanguage || 'English');
     if (!systemInstruction.includes('{{targetLanguage}}')) {
@@ -709,26 +702,9 @@ router.post('/translate-stream', async (req, res) => {
 
     try {
         if (provider === 'deepseek' || provider === 'openrouter' || provider === 'openai') {
-            let currentApiKey, apiUrl, providerName, headers;
-
-            if (provider === 'deepseek') {
-                currentApiKey = deepseekApiKey; apiUrl = DEEPSEEK_API_URL; providerName = 'DeepSeek';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            } else if (provider === 'openrouter') {
-                currentApiKey = openRouterApiKey; apiUrl = OPENROUTER_API_URL; providerName = 'OpenRouter';
-                headers = {
-                    'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}`,
-                    'HTTP-Referer': 'https://github.com/subscribe-to-my-channel-on-youtube/lingua-scripter',
-                    'X-Title': 'Lingua Scripter by Subscribe'
-                };
-            } else {
-                currentApiKey = openaiApiKey;
-                if (!openaiEndpoint) throw new Error('OpenAI Endpoint URL is missing.');
-                apiUrl = `${openaiEndpoint.replace(/\/$/, '')}/v1/chat/completions`; providerName = 'OpenAI';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            }
-
-            if (!currentApiKey) throw new Error(`${providerName} API Key is missing.`);
+            const cfg = resolveOpenAILikeProvider(provider, req.body);
+            if (!cfg.ok) throw new Error(cfg.error);
+            const { apiUrl, providerName, headers } = cfg;
 
             const requestPayload = {
                 model,
@@ -740,7 +716,7 @@ router.post('/translate-stream', async (req, res) => {
                 requestPayload.route = { providers: openRouterModelProviders.split(',').map(p => p.trim()) };
             }
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload), signal: abortCtl.signal });
             if (!response.ok) {
                 const errorData = await response.json();
                 throw new Error(errorData.error?.message || 'Streaming translation failed.');
@@ -751,6 +727,7 @@ router.post('/translate-stream', async (req, res) => {
             let sseBuffer = '';
 
             while (true) {
+                if (abortCtl.signal.aborted) { try { await reader.cancel(); } catch {} break; }
                 const { done, value } = await reader.read();
                 if (done) {
                     // Flush any remaining data in SSE buffer
@@ -815,6 +792,7 @@ router.post('/translate-stream', async (req, res) => {
             const responseStream = await ai.models.generateContentStream(requestPayload);
             let lastChunk;
             for await (const chunk of responseStream) {
+                if (abortCtl.signal.aborted) break;
                 const chunkText = chunk.text;
                 fullResponseText += chunkText;
                 lastChunk = chunk;
@@ -825,7 +803,7 @@ router.post('/translate-stream', async (req, res) => {
         res.end();
     } catch (error) {
         console.error("Streaming translation failed:", error);
-        res.write(`Error: Failed to translate. ${error.message}`);
+        res.write(`[ERROR]${error.message}`);
         res.end();
     }
 });
@@ -833,6 +811,7 @@ router.post('/translate-stream', async (req, res) => {
 // Find phrases (for glossary)
 router.post('/find-phrases', async (req, res) => {
     const { originalText, translatedText, selectedTranslations, model, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint } = req.body;
+    const abortCtl = linkClientAbort(req, res);
 
     const systemInstruction = `You are an expert linguistic analysis tool. Your task is to find the corresponding phrases in an original text given its translation and a list of selected translated phrases. Respond ONLY with a valid JSON object and nothing else. The JSON object should contain an 'entries' key, which holds an array of objects. Each object in the array should have 'translation' and 'original' keys. The 'original' value should be the exact, unmodified phrase from the original text. If a corresponding phrase cannot be found for a given translation, omit it from the array. Do not include any explanatory text, markdown formatting, or anything besides the JSON object.`;
     const userPrompt = `
@@ -845,27 +824,13 @@ Respond with a JSON object in the format: {"entries": [{"translation": "...", "o
     const startTime = performance.now();
     try {
         if (provider === 'deepseek' || provider === 'openrouter' || provider === 'openai') {
-            let currentApiKey, apiUrl, providerName, headers;
-            if (provider === 'deepseek') {
-                currentApiKey = deepseekApiKey; apiUrl = DEEPSEEK_API_URL; providerName = 'DeepSeek';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            } else if (provider === 'openrouter') {
-                currentApiKey = openRouterApiKey; apiUrl = OPENROUTER_API_URL; providerName = 'OpenRouter';
-                headers = {
-                    'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}`,
-                    'HTTP-Referer': 'https://github.com/subscribe-to-my-channel-on-youtube/lingua-scripter', 'X-Title': 'Lingua Scripter by Subscribe'
-                };
-            } else {
-                currentApiKey = openaiApiKey;
-                if (!openaiEndpoint) return res.status(400).json({ error: 'OpenAI Endpoint URL is missing.' });
-                apiUrl = `${openaiEndpoint.replace(/\/$/, '')}/v1/chat/completions`; providerName = 'OpenAI';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            }
-            if (!currentApiKey) return res.status(400).json({ error: `${providerName} API Key is missing.` });
+            const cfg = resolveOpenAILikeProvider(provider, req.body);
+            if (!cfg.ok) return res.status(cfg.status).json({ error: cfg.error });
+            const { apiUrl, providerName, headers } = cfg;
 
             const requestPayload = { model, messages: [{ role: 'system', content: systemInstruction }, { role: 'user', content: userPrompt }], temperature: 0.1, response_format: { type: 'json_object' } };
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload), signal: abortCtl.signal });
             const data = await response.json();
             if (!response.ok) throw new Error(data.error?.message || 'AI lookup failed.');
 
@@ -905,6 +870,7 @@ Respond with a JSON object in the format: {"entries": [{"translation": "...", "o
 // Analyze characters
 router.post('/analyze-characters', async (req, res) => {
     const { originalText, model, provider, apiKey, deepseekApiKey, openRouterApiKey, openaiApiKey, openaiEndpoint, targetLanguage } = req.body;
+    const abortCtl = linkClientAbort(req, res);
 
     const systemInstruction = `Analyze the provided text to identify all characters. For each character, provide their original name, their name translated into ${targetLanguage || 'English'}, their gender (e.g., "Male", "Female", "Non-binary", or "Unknown"), and common pronouns (e.g., "he/him", "she/her", "they/them"). Respond ONLY with a valid JSON object. The object must have a single key "characters" which is an array of objects. Each object in the array should have "name", "translatedName", "gender", and "pronouns" keys. The 'name' field must be the original, raw name from the source text. If no characters are found, return an empty array. Do not include any explanatory text, markdown formatting, or anything besides the JSON object.`;
     const userPrompt = `Text to analyze:\n---\n${originalText}\n---\n`;
@@ -912,27 +878,13 @@ router.post('/analyze-characters', async (req, res) => {
     const startTime = performance.now();
     try {
         if (provider === 'deepseek' || provider === 'openrouter' || provider === 'openai') {
-            let currentApiKey, apiUrl, providerName, headers;
-            if (provider === 'deepseek') {
-                currentApiKey = deepseekApiKey; apiUrl = DEEPSEEK_API_URL; providerName = 'DeepSeek';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            } else if (provider === 'openrouter') {
-                currentApiKey = openRouterApiKey; apiUrl = OPENROUTER_API_URL; providerName = 'OpenRouter';
-                headers = {
-                    'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}`,
-                    'HTTP-Referer': 'https://github.com/subscribe-to-my-channel-on-youtube/lingua-scripter', 'X-Title': 'Lingua Scripter by Subscribe'
-                };
-            } else {
-                currentApiKey = openaiApiKey;
-                if (!openaiEndpoint) return res.status(400).json({ error: 'OpenAI Endpoint URL is missing.' });
-                apiUrl = `${openaiEndpoint.replace(/\/$/, '')}/v1/chat/completions`; providerName = 'OpenAI';
-                headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
-            }
-            if (!currentApiKey) return res.status(400).json({ error: `${providerName} API Key is missing.` });
+            const cfg = resolveOpenAILikeProvider(provider, req.body);
+            if (!cfg.ok) return res.status(cfg.status).json({ error: cfg.error });
+            const { apiUrl, providerName, headers } = cfg;
 
             const requestPayload = { model, messages: [{ role: 'system', content: systemInstruction }, { role: 'user', content: userPrompt }], temperature: 0.1, response_format: { type: 'json_object' } };
 
-            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload) });
+            const response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(requestPayload), signal: abortCtl.signal });
             const data = await response.json();
             if (!response.ok) throw new Error(data.error?.message || 'AI analysis failed.');
 

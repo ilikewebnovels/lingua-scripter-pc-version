@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Preset, PresetSettings } from '../types';
 
-const API_URL = 'http://localhost:3001/api';
+const API_URL = '/api';
 
 export const usePresets = () => {
   const [presets, setPresets] = useState<Preset[]>([]);
