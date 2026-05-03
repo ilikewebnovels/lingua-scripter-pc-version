@@ -323,14 +323,6 @@ export default function App() {
         setError(null);
         setSelectedWords([]);
         setIsEditMode(false); // Exit edit mode when switching chapters
-
-        // Persist last chapter read to project
-        if (activeProjectId) {
-          updateProject(activeProjectId, {
-            lastChapterId: chapter.id,
-            lastChapterTitle: chapter.title || 'Untitled Chapter',
-          });
-        }
       }
     } else {
       // It's a new or cleared chapter
@@ -341,7 +333,26 @@ export default function App() {
       setSelectedWords([]);
       setIsEditMode(false);
     }
-  }, [activeChapterId, chapters, activeProjectId, updateProject]);
+  }, [activeChapterId, chapters]);
+
+  // Persist last-read chapter to the project, debounced. This is split off
+  // from the load effect so it doesn't re-fire on every `chapters` change
+  // (translations, batch updates, etc.) — each fire is a PUT, and concurrent
+  // PUTs against the same project file can land out of order on the server,
+  // letting an older lastChapterId clobber a newer one. Debouncing collapses
+  // rapid navigation into a single write.
+  useEffect(() => {
+    if (!activeChapterId || !activeProjectId) return;
+    const chapter = chapters.find(c => c.id === activeChapterId);
+    if (!chapter) return;
+    const timer = setTimeout(() => {
+      updateProject(activeProjectId, {
+        lastChapterId: chapter.id,
+        lastChapterTitle: chapter.title || 'Untitled Chapter',
+      });
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [activeChapterId, activeProjectId, chapters, updateProject]);
 
   const handleConnect = useCallback(async () => {
     setConnectionStatus('connecting');
