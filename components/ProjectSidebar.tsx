@@ -44,6 +44,7 @@ interface ProjectSidebarProps {
   removeTerm: (original: string) => void;
   updateTerm: (oldOriginal: string, newEntry: GlossaryEntry) => void;
   activeGlossaryTerms: GlossaryEntry[];
+  onGlossaryTranslationEdited?: (oldTranslation: string, newTranslation: string) => void;
   // Character DB Props
   characterDB: Character[];
   addCharacters: (characters: Omit<Character, 'id'>[]) => void;
@@ -85,6 +86,7 @@ const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
   removeTerm,
   updateTerm,
   activeGlossaryTerms,
+  onGlossaryTranslationEdited,
   characterDB,
   addCharacters,
   removeCharacter,
@@ -123,10 +125,21 @@ const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
 
   const totalChapterPages = Math.ceil(filteredChapters.length / ITEMS_PER_PAGE);
 
-  // Reset chapter page when search query changes or project changes
+  // Reset chapter page when the search query changes. Project changes are handled
+  // by the auto-jump effect below so we land on the page containing the active chapter.
   React.useEffect(() => {
     setChapterPage(1);
-  }, [chapterSearchQuery, activeProjectId]);
+  }, [chapterSearchQuery]);
+
+  // Auto-jump to the page containing the active chapter. Skipped while a search is
+  // active so we don't yank the user away from filtered results they're scanning.
+  React.useEffect(() => {
+    if (!activeChapterId || chapterSearchQuery.trim()) return;
+    const idx = filteredChapters.findIndex(c => c.id === activeChapterId);
+    if (idx < 0) return;
+    const targetPage = Math.floor(idx / ITEMS_PER_PAGE) + 1;
+    setChapterPage(prev => (prev === targetPage ? prev : targetPage));
+  }, [activeChapterId, filteredChapters, chapterSearchQuery]);
 
   const filteredProjects = useMemo(() => {
     if (searchQuery.trim()) {
@@ -363,6 +376,7 @@ const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                 removeTerm={removeTerm}
                 updateTerm={updateTerm}
                 activeGlossaryTerms={activeGlossaryTerms}
+                onTranslationEdited={onGlossaryTranslationEdited}
               />
             ) : (
               <CharacterManager

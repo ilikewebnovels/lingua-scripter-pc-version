@@ -7,6 +7,7 @@ interface GlossaryManagerProps {
   removeTerm: (original: string) => void;
   updateTerm: (oldOriginal: string, newEntry: GlossaryEntry) => void;
   activeGlossaryTerms: GlossaryEntry[];
+  onTranslationEdited?: (oldTranslation: string, newTranslation: string) => void;
 }
 
 const TrashIcon = () => (
@@ -31,7 +32,7 @@ const ChevronRightIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className
 
 const ITEMS_PER_PAGE = 10;
 
-const GlossaryManager: React.FC<GlossaryManagerProps> = ({ glossary, addTerm, removeTerm, updateTerm, activeGlossaryTerms }) => {
+const GlossaryManager: React.FC<GlossaryManagerProps> = ({ glossary, addTerm, removeTerm, updateTerm, activeGlossaryTerms, onTranslationEdited }) => {
   const [original, setOriginal] = useState('');
   const [translation, setTranslation] = useState('');
   const [editingOriginal, setEditingOriginal] = useState<string | null>(null);
@@ -81,7 +82,18 @@ const GlossaryManager: React.FC<GlossaryManagerProps> = ({ glossary, addTerm, re
   const handleUpdateTerm = (e: React.FormEvent) => {
     e.preventDefault();
     if (editingOriginal && editForm.original.trim() && editForm.translation.trim()) {
+      const prevEntry = glossary.find(g => g.original === editingOriginal);
       updateTerm(editingOriginal, editForm);
+      // Only fire when the original is unchanged but the translation actually differs.
+      // Editing the original term doesn't invalidate previously-translated chapters.
+      if (
+        onTranslationEdited &&
+        prevEntry &&
+        prevEntry.original === editForm.original &&
+        prevEntry.translation !== editForm.translation
+      ) {
+        onTranslationEdited(prevEntry.translation, editForm.translation);
+      }
       setEditingOriginal(null);
     }
   };

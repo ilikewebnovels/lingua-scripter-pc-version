@@ -22,6 +22,7 @@ import { translateText, translateTextStream, testConnection, findOriginalPhrases
 import { GlossaryEntry, Project, Character, BatchChapterStatus, BatchTranslationProgress } from './types';
 import { TokenizerModel } from './utils/tokenizer';
 import { buildBoundaryRegex } from './utils/regexBoundary';
+import { replaceAll as glossaryReplaceAll } from './utils/glossaryReplace';
 import {
   MenuIcon,
   LogoIcon,
@@ -48,6 +49,7 @@ const StatisticsDashboard = React.lazy(() => import('./components/StatisticsDash
 const BackupRestoreModal = React.lazy(() => import('./components/BackupRestoreModal'));
 const ImportModal = React.lazy(() => import('./components/ImportModal'));
 const BatchTranslateModal = React.lazy(() => import('./components/BatchTranslateModal'));
+const GlossaryRetranslateModal = React.lazy(() => import('./components/GlossaryRetranslateModal'));
 
 // Import types separately (not lazy-loaded)
 import type { ProjectBackup } from './components/BackupRestoreModal';
@@ -94,6 +96,7 @@ export default function App() {
   const [isBackupRestoreOpen, setIsBackupRestoreOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [isBatchTranslateOpen, setIsBatchTranslateOpen] = useState(false);
+  const [retranslatePrompt, setRetranslatePrompt] = useState<{ oldTranslation: string; newTranslation: string } | null>(null);
   const [isChapterListOpen, setIsChapterListOpen] = useState(false);
   const chapterListRef = useRef<HTMLDivElement>(null);
 
@@ -682,11 +685,35 @@ export default function App() {
     setIsEditMode(false);
   }
 
+  // Set when the user picks a project, so the chapter-load effect knows to auto-open
+  // the last-read (or first) chapter. Cleared after the auto-select fires, so later
+  // setActiveChapterId(null) calls (new chapter, delete) don't re-trigger it.
+  const pendingAutoSelectProjectIdRef = useRef<string | null>(null);
+
   const handleSelectProject = (id: string | null) => {
+    pendingAutoSelectProjectIdRef.current = id;
     setActiveProjectId(id);
     setActiveChapterId(null);
     // Chapters will be fetched by the useEffect that watches activeProjectId
   };
+
+  useEffect(() => {
+    const pendingId = pendingAutoSelectProjectIdRef.current;
+    if (!pendingId || pendingId !== activeProjectId) return;
+    if (activeChapterId) return;
+    if (loadingProjectId === activeProjectId) return; // still loading
+    if (projectChapters.length === 0) {
+      // Project loaded but has no chapters - clear the flag so we don't keep trying.
+      pendingAutoSelectProjectIdRef.current = null;
+      return;
+    }
+    const project = projects.find(p => p.id === activeProjectId);
+    const lastRead = project?.lastChapterId
+      ? projectChapters.find(c => c.id === project.lastChapterId)
+      : null;
+    setActiveChapterId((lastRead || projectChapters[0]).id);
+    pendingAutoSelectProjectIdRef.current = null;
+  }, [activeProjectId, activeChapterId, projectChapters, projects, loadingProjectId]);
 
   const handleDeleteChapter = useCallback(async (chapterId: string) => {
     try {
@@ -716,6 +743,25 @@ export default function App() {
       updateTerm(activeProjectId, oldOriginal, newEntry);
     }
   }, [activeProjectId, updateTerm]);
+
+  const handleGlossaryTranslationEdited = useCallback((oldTranslation: string, newTranslation: string) => {
+    if (!activeProjectId || !oldTranslation.trim() || oldTranslation === newTranslation) return;
+    setRetranslatePrompt({ oldTranslation, newTranslation });
+  }, [activeProjectId]);
+
+  const handleConfirmRetranslate = useCallback(async (chapterIds: string[]) => {
+    if (!retranslatePrompt) return;
+    const { oldTranslation, newTranslation } = retranslatePrompt;
+    const idSet = new Set(chapterIds);
+    const targets = projectChapters.filter(ch => idSet.has(ch.id));
+    for (const ch of targets) {
+      const next = glossaryReplaceAll(ch.translatedText || '', oldTranslation, newTranslation, settings.targetLanguage);
+      if (next !== ch.translatedText) {
+        await updateChapter(ch.id, { translatedText: next });
+      }
+    }
+    setRetranslatePrompt(null);
+  }, [retranslatePrompt, projectChapters, updateChapter, settings.targetLanguage]);
 
   const handleAddCharacters = useCallback((characters: Omit<Character, 'id'>[]) => {
     console.log('[App] handleAddCharacters called with', characters.length, 'characters, activeProjectId:', activeProjectId);
@@ -885,6 +931,7 @@ export default function App() {
           addTerm={handleAddTerm}
           removeTerm={handleRemoveTerm}
           updateTerm={handleUpdateTerm}
+          onGlossaryTranslationEdited={handleGlossaryTranslationEdited}
           characterDB={activeCharacterDB}
           addCharacters={handleAddCharacters}
           removeCharacter={handleRemoveCharacter}
@@ -1192,6 +1239,20 @@ export default function App() {
             projectId={activeProjectId}
             existingChapterNumbers={projectChapters.map(ch => ch.chapterNumber)}
             onImportChapters={addChaptersBatch}
+          />
+        )}
+      </Suspense>
+
+      <Suspense fallback={<ModalLoader />}>
+        {retranslatePrompt && (
+          <GlossaryRetranslateModal
+            isOpen={!!retranslatePrompt}
+            oldTranslation={retranslatePrompt.oldTranslation}
+            newTranslation={retranslatePrompt.newTranslation}
+            chapters={projectChapters}
+            targetLanguage={settings.targetLanguage}
+            onConfirm={handleConfirmRetranslate}
+            onClose={() => setRetranslatePrompt(null)}
           />
         )}
       </Suspense>
