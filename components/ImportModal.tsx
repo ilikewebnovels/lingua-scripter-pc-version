@@ -171,17 +171,34 @@ async function parseEpub(arrayBuffer: ArrayBuffer): Promise<{ title: string; ori
 }
 
 /**
- * Parse TXT file into chapters (client-side)
+ * Parse TXT file into chapters (client-side).
+ *
+ * The previous patterns required a leading `\n` and a trailing `\n` and only
+ * matched `Chapter <digits>` / `第<digits>章`. Real-world TXTs routinely fail
+ * those constraints (heading on first line, CRLF endings, "Chapter One",
+ * "Ch. 1", roman numerals, Chinese numerals, etc.) so we'd silently fall back
+ * to "single chapter" — see the regression where every imported file landed as
+ * one giant blob.
  */
 async function parseTxt(text: string): Promise<{ title: string; originalText: string; translatedText: string }[]> {
     const chapters: { title: string; originalText: string; translatedText: string }[] = [];
 
-    // Try to split by chapter patterns
+    // Normalise CRLF / lone CR to LF so anchors and `[^\n]` behave predictably.
+    text = text.replace(/\r\n?/g, '\n');
+
+    // Each pattern anchors on start-of-string OR a preceding newline so the
+    // very first line of the file is eligible. The capture group is the
+    // heading text alone — we recompute its absolute index below to skip the
+    // consumed `\n`.
+    const wordNum = '(?:One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|Eighteen|Nineteen|Twenty)';
+    const enNum = `(?:\\d+|[IVXLCDM]+|${wordNum})`;
     const chapterPatterns = [
-        /\n\s*(Chapter\s+\d+[^\n]*)\n/gi,
-        /\n\s*(CHAPTER\s+\d+[^\n]*)\n/gi,
-        /\n\s*(第[一二三四五六七八九十百千\d]+章[^\n]*)\n/gi,
-        /\n\s*(Part\s+\d+[^\n]*)\n/gi
+        // English: Chapter / CHAPTER / Ch / Ch. + digits|roman|word
+        new RegExp(`(?:^|\\n)[ \\t]*((?:Chapter|Ch\\.?)\\s+${enNum}\\b[^\\n]*)`, 'gi'),
+        // Part / Section / Volume / Book / Episode
+        new RegExp(`(?:^|\\n)[ \\t]*((?:Part|Section|Volume|Book|Episode)\\s+${enNum}\\b[^\\n]*)`, 'gi'),
+        // Chinese: 第N章/节/卷/回 with Han or Arabic numerals (incl. full-width)
+        /(?:^|\n)[ \t]*(第[一二三四五六七八九十百千万零〇两0-9０-９]+[章节節卷回篇][^\n]*)/g,
     ];
 
     let splitPoints: { index: number; title: string }[] = [];
@@ -189,18 +206,23 @@ async function parseTxt(text: string): Promise<{ title: string; originalText: st
     for (const pattern of chapterPatterns) {
         let match;
         while ((match = pattern.exec(text)) !== null) {
+            // match.index points at the `\n` (or 0); the heading itself begins
+            // wherever match[1] sits inside match[0].
+            const headingStart = match.index + match[0].indexOf(match[1]);
             splitPoints.push({
-                index: match.index,
+                index: headingStart,
                 title: match[1].trim()
             });
         }
     }
 
-    if (splitPoints.length > 0) {
-        // Sort by index
-        splitPoints.sort((a, b) => a.index - b.index);
+    // Dedupe by index — multiple patterns can match the same line.
+    const seen = new Set<number>();
+    splitPoints = splitPoints
+        .filter(p => (seen.has(p.index) ? false : (seen.add(p.index), true)))
+        .sort((a, b) => a.index - b.index);
 
-        // Add chapters based on split points
+    if (splitPoints.length > 0) {
         for (let i = 0; i < splitPoints.length; i++) {
             const start = splitPoints[i].index;
             const end = i < splitPoints.length - 1 ? splitPoints[i + 1].index : text.length;
@@ -215,7 +237,7 @@ async function parseTxt(text: string): Promise<{ title: string; originalText: st
             }
         }
 
-        // If there's content before the first chapter
+        // If there's substantial content before the first heading, keep it as a Prologue.
         if (splitPoints[0].index > 100) {
             const prologueText = text.substring(0, splitPoints[0].index).trim();
             if (prologueText.length > 100) {
