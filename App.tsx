@@ -335,24 +335,71 @@ export default function App() {
     }
   }, [activeChapterId, chapters]);
 
-  // Persist last-read chapter to the project, debounced. This is split off
-  // from the load effect so it doesn't re-fire on every `chapters` change
-  // (translations, batch updates, etc.) — each fire is a PUT, and concurrent
-  // PUTs against the same project file can land out of order on the server,
-  // letting an older lastChapterId clobber a newer one. Debouncing collapses
-  // rapid navigation into a single write.
+  // Persist last-read chapter to the project, debounced. The timer must NOT
+  // depend on `chapters` — auto-save while typing, streaming translation
+  // chunks, glossary rewrites and batch updates all mutate the chapters
+  // array, and listing it as a dep would cancel + restart the timer on every
+  // mutation, starving the PUT indefinitely. Instead we depend only on the
+  // active id/project, and look up the title from a ref at fire time so we
+  // still pick up renames. We also flush synchronously on pagehide so a
+  // refresh right after navigating doesn't lose the write.
+  const chaptersRef = useRef(chapters);
+  useEffect(() => { chaptersRef.current = chapters; }, [chapters]);
+
+  const pendingPersistRef = useRef<{ projectId: string; chapterId: string } | null>(null);
+
   useEffect(() => {
-    if (!activeChapterId || !activeProjectId) return;
-    const chapter = chapters.find(c => c.id === activeChapterId);
-    if (!chapter) return;
+    if (!activeChapterId || !activeProjectId) {
+      pendingPersistRef.current = null;
+      return;
+    }
+    pendingPersistRef.current = { projectId: activeProjectId, chapterId: activeChapterId };
     const timer = setTimeout(() => {
-      updateProject(activeProjectId, {
-        lastChapterId: chapter.id,
-        lastChapterTitle: chapter.title || 'Untitled Chapter',
+      const pending = pendingPersistRef.current;
+      if (!pending) return;
+      const chapter = chaptersRef.current.find(c => c.id === pending.chapterId);
+      // Even if the chapter hasn't loaded yet, still persist the id — title
+      // is best-effort and will be corrected on the next navigation.
+      updateProject(pending.projectId, {
+        lastChapterId: pending.chapterId,
+        lastChapterTitle: chapter?.title || 'Untitled Chapter',
       });
+      pendingPersistRef.current = null;
     }, 600);
     return () => clearTimeout(timer);
-  }, [activeChapterId, activeProjectId, chapters, updateProject]);
+  }, [activeChapterId, activeProjectId, updateProject]);
+
+  // Flush on tab hide / close. `pagehide` fires reliably across desktop and
+  // mobile (unlike `beforeunload`) and `sendBeacon` survives the unload.
+  useEffect(() => {
+    const flush = () => {
+      const pending = pendingPersistRef.current;
+      if (!pending) return;
+      const chapter = chaptersRef.current.find(c => c.id === pending.chapterId);
+      const body = JSON.stringify({
+        lastChapterId: pending.chapterId,
+        lastChapterTitle: chapter?.title || 'Untitled Chapter',
+        updatedAt: Date.now(),
+      });
+      try {
+        const blob = new Blob([body], { type: 'application/json' });
+        // sendBeacon issues POST, not PUT, so fall back to fetch+keepalive
+        // — both survive page unload, but keepalive lets us keep the PUT verb
+        // the server expects.
+        fetch(`/api/projects/${pending.projectId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: blob,
+          keepalive: true,
+        }).catch(() => {});
+      } catch {
+        // ignore — best-effort
+      }
+      pendingPersistRef.current = null;
+    };
+    window.addEventListener('pagehide', flush);
+    return () => window.removeEventListener('pagehide', flush);
+  }, []);
 
   const handleConnect = useCallback(async () => {
     setConnectionStatus('connecting');
